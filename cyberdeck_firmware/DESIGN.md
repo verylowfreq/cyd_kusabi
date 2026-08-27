@@ -440,38 +440,60 @@ US 配列と JIS 配列の両方の変換表を持ち、実行時に切り替え
 **ソースにも sdkconfig にも書かない**（ABOUT.md に平文で載っている PSK / SSH パスワードは
 テスト用と理解しているが、ファームには焼かない）。
 
-### 8.2 SSH クライアント — 最大の不確実性
+### 8.2 SSH クライアント — libssh2 に決定 (2026-08-27)
 
-ESP-IDF 上で PTY 付きの対話 SSH セッションが張れるかがプロジェクトの成否を決める。
-**M2 で最優先に潰す。**
+**採用: libssh2 1.11.1 + mbedTLS。** `components_port/libssh2/` にベンダリング済み。
+実機で `libssh2_init()` まで通ることを確認済み。
 
-| 候補 | ライセンス | 備考 |
+当初は導入コストの低さから wolfSSH を第一候補にしていたが、
+実際に調べた結果 **クライアント側 PTY が使えない** ことが分かったので覆した。
+
+#### wolfSSH を採らなかった理由
+
+| # | 事実 | 影響 |
 |---|---|---|
-| **wolfSSH + wolfSSL**（第一候補） | GPLv3 or 商用 | `wolfssl/wolfssh` 1.4.15 がコンポーネントレジストリにあり `idf.py add-dependency` 一発。ESP32 のハード暗号アクセラレータ対応も入っている |
-| libssh2 | BSD-3 | mbedTLS バックエンドあり。ESP-IDF の component 化は手作業 |
-| 自前実装 | — | 現実的でない |
+| 1 | PTY 要求 `SendChannelTerminalRequest()` が `#if defined(WOLFSSH_TERM) && !defined(NO_FILESYSTEM)` の中にある（`src/internal.c:15995`） | 条件を満たさないと関数ごと消える |
+| 2 | ベンダー純正の ESP32 用 `user_settings.h` が **`NO_FILESYSTEM` を定義**している（439 行目） | 既定では PTY 要求がコンパイルされない |
+| 3 | 上書き手段は wolfSSL の `user_settings.h` をプロジェクト側で丸ごと抱えることだけ | コンポーネント更新のたびに衝突する |
+| 4 | 有効化しても `GetTerminalInfo()` が非 POSIX ターゲットでは **80x24 と "xterm" をハードコード**（`src/internal.c:16231`） | 実機は 53x20。`wolfSSH_ChangeTerminalSize()` で後追い修正が要る |
 
-**GPLv3 は本プロジェクトでは問題にしない**という判断（2026-08-27）。
-導入コストが最も低い wolfSSH を第一候補とする。
-wolfSSH でクライアント PTY が期待通り動かなければ libssh2 に切り替える。
+PTY は「Claude Code / Codex の CLI が動く」という目標に対して譲れない。
+`libssh2_channel_request_pty_ex(ch, "xterm-256color", 14, NULL, 0, cols, rows, 0, 0)` は
+端末名もサイズも引数で受け取るので、回避策なしで正しい値を渡せる。
 
-必要なもの:
+GPLv3 の許容は不要になった（libssh2 は BSD-3-Clause）。
 
-- 鍵交換: `curve25519-sha256`（mbedTLS で対応）
-- ホスト鍵: `ssh-ed25519` / `rsa-sha2-256`
-- 暗号: `aes128-ctr` / `chacha20-poly1305`（ハード AES アクセラレータが効く前者を優先）
-- PTY 要求で `xterm-256color` と 80x26 を渡すこと
-- ウィンドウサイズ変更 (`window-change`) の通知
-- ノンブロッキング I/O でメインループに組み込む
+#### ベンダリングの方針
 
-RAM 見積り: 40〜60KB 程度。PSRAM に逃がせるので問題にならない見込み。
+コンポーネントレジストリに libssh2 は無いので上流の配布物を取り込む。
+`components_port/libssh2/README.md` に版・入手元・更新手順を書いてある。
 
-**ホスト鍵検証**: `known_hosts` を SD に置く。初回は指紋を表示して確認を求める。
+- ビルド対象は上流 `src/Makefile.inc` の `CSOURCES` のみ。
+- **`upstream/src/` からファイルを削らないこと。** `agent.c` は `agent_win.c` を
+  **無条件に** `#include` し、`crypto.c` はバックエンドの `.c` を `#include` する。
+  中身側で `#ifdef` 分岐しているので、消すとビルドが壊れる。
+- 設定は `libssh2_config.h`（`HAVE_CONFIG_H` 経由で `libssh2_setup.h` が読む）。
+  **`HAVE_POLL` は定義しないこと。** lwIP / newlib に `poll.h` は無い。`select` を使う。
 
-**リスク**: mbedTLS のバージョン差で libssh2 のバックエンドが噛み合わない可能性。
-M2 の最初の 1 日でビルドが通らなければ wolfSSH に切り替える（ライセンスは要相談）。
+#### M2 で実装するもの
 
----
+- 鍵交換 `curve25519-sha256`、ホスト鍵 `ssh-ed25519` / `rsa-sha2-256`
+- 暗号 `aes128-ctr`（ESP32-S3 のハード AES が効く）/ `chacha20-poly1305`
+- `libssh2_channel_request_pty_ex()` に `cdk_term` の実際の `cols` / `rows` を渡す。
+  **80x26 ではなく試作機の 53x20。** 固定値を書かないこと。
+- `libssh2_channel_request_pty_size_ex()` で画面サイズ変更を通知
+- ノンブロッキング + `select` でメインループに組み込む
+
+**ホスト鍵検証**: `known_hosts` を SD に置く（M4）。それまでは指紋をログに出して先へ進む。
+
+#### タスク構成
+
+SSH の受信は**メインループが `select` で他と一緒にポーリングする**。
+専用タスク + キューにはしない。M2 の規模では単純さが勝るため。
+
+この選択は M4 で効いてくる。SD と LCD が SPI3 を共有するので、
+キャンバスへの描画と SD アクセスを直列化するミューテックスが要る。
+描画がメインループ内で完結していれば、ロックはそこ 1 箇所で済む。
 
 ## 9. SKK 日本語入力
 

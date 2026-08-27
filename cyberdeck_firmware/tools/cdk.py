@@ -16,6 +16,7 @@ DESIGN.md §3 の「エージェントが自律的に回せる開発ループ」
   python tools/cdk.py shot out.png --verify   画面を取得しホストの基準画像と比較
   python tools/cdk.py type "ls -la\\n"         テキストを入力として流し込む
   python tools/cdk.py key ctrl+c              キーイベントを送る
+  python tools/cdk.py cam out.jpg            実機のパネルをカメラで撮る
   python tools/cdk.py flash                   ビルド済みバイナリを書き込む
   python tools/cdk.py selftest                boot + ping + shot --verify
 
@@ -534,6 +535,31 @@ def cmd_build(args) -> int:
     return r.returncode
 
 
+CAMERA_SCRIPT = PROJECT_DIR.parent / "capture-camera.py"
+
+
+def cmd_cam(args) -> int:
+    """実機のパネルをカメラで撮る。
+
+    スクリーンショット (shot) はキャンバスのダンプなので、パネルへの転送が
+    壊れていても正しい絵が返ってくる。向き・バイト順・部分帯転送・
+    バックライトといった「キャンバスから先」を見るにはこちらが要る。
+    """
+    if not CAMERA_SCRIPT.exists():
+        print(f"[cdk] {CAMERA_SCRIPT} がありません", file=sys.stderr)
+        return 1
+    cmd = [sys.executable, str(CAMERA_SCRIPT), str(Path(args.out).resolve())]
+    if args.index is not None:
+        cmd.append(str(args.index))
+    r = subprocess.run(cmd, cwd=CAMERA_SCRIPT.parent, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr)
+        return r.returncode
+    print(f"[cdk] {args.out} に保存しました")
+    return 0
+
+
 def cmd_selftest(args) -> int:
     """M0 の完了条件をひととおり確認する。"""
     print("== boot ==")
@@ -637,6 +663,11 @@ def main() -> int:
     p = sub.add_parser("flash", help="ビルド済みバイナリを書き込む")
     p.add_argument("--baud", type=int, default=921600)
     p.set_defaults(func=cmd_flash)
+
+    p = sub.add_parser("cam", help="実機のパネルをカメラで撮る")
+    p.add_argument("out", nargs="?", default="camera.jpg")
+    p.add_argument("--index", type=int, default=None, help="カメラ index")
+    p.set_defaults(func=cmd_cam)
 
     p = sub.add_parser("selftest", help="boot + ping + shot --verify")
     p.add_argument("--timeout", type=float, default=20.0)

@@ -29,3 +29,7 @@ __pycache__/
 
 # 秘密情報
 .env
+
+# カメラ撮影
+camera-*.jpg
+cyberdeck_firmware/*.jpg

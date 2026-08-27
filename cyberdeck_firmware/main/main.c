@@ -12,6 +12,7 @@
 #include "cdk_font.h"
 #include "cdk_keys.h"
 #include "cdk_link.h"
+#include "cdk_net.h"
 #include "cdk_proto.h"
 #include "cdk_screen.h"
 #include "cdk_term.h"
@@ -163,6 +164,9 @@ void app_main(void)
     cdk_screen_draw(&s_screen, &s_canvas, &s_term, true);
     ESP_ERROR_CHECK(cdk_display_flush(&s_canvas));
     s_dirty = false;
+
+    /* M2: libssh2 が実機で生きているかを起動時に一度だけ確かめる。 */
+    (void)cdk_net_probe();
 
     cdk_link_set_handler(on_frame, NULL);
     ESP_ERROR_CHECK(cdk_link_init());
