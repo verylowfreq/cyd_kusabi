@@ -70,6 +70,10 @@ static app_ctx_t          s_ctx;
 
 static cdk_skk_t          s_skk;
 static cdk_skk_dict_t     s_skkdict;
+/* 個人辞書。SD が無いと消えるが、RAM 上でだけ働かせておく。
+ * 学習しないより、その場かぎりでも先頭に来るほうが打鍵が減る。 */
+static cdk_skk_user_entry_t s_skkuser_store[192];
+static cdk_skk_user_t       s_skkuser;
 
 /* ------------------------------------------------------------------ */
 /* セッション                                                          */
@@ -532,11 +536,16 @@ void app_main(void)
      * SD のマウントより後に開くこと。順番を逆にすると、SD に辞書を
      * 置いてもフラッシュのほうが使われる。 */
     cdk_skk_init(&s_skk, skk_commit, NULL);
+    cdk_skk_user_init(&s_skkuser, s_skkuser_store,
+                      (int)(sizeof(s_skkuser_store) / sizeof(s_skkuser_store[0])));
+    const int learned = cdk_skkuser_attach(&s_skkuser);
+    cdk_skk_set_user(&s_skk, &s_skkuser);
+
     if (cdk_skkdict_open(&s_skkdict) == ESP_OK) {
         cdk_skk_set_dict(&s_skk, &s_skkdict);
-        term_printf("skk   : \033[32m送りあり%lu 送りなし%lu\033[0m\r\n",
+        term_printf("skk   : \033[32m送りあり%lu 送りなし%lu\033[0m 学習 %d 件\r\n",
                     (unsigned long)s_skkdict.ari_count,
-                    (unsigned long)s_skkdict.nasi_count);
+                    (unsigned long)s_skkdict.nasi_count, learned);
     } else {
         term_printf("\033[33mskk   : 辞書がありません\033[0m\r\n");
     }

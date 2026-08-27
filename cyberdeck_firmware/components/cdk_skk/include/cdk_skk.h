@@ -25,6 +25,7 @@
 #include "cdk_keys.h"
 #include "cdk_skk_dict.h"
 #include "cdk_skk_romkana.h"
+#include "cdk_skk_user.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -60,6 +61,11 @@ typedef struct {
     void             *ctx;
 
     const cdk_skk_dict_t *dict;
+    cdk_skk_user_t       *user; /* 個人辞書。NULL なら学習しない */
+
+    /* いま引いている見出し（学習に使う）。 */
+    char lookup_key[CDK_SKK_KEY_MAX];
+    bool lookup_okuri;
 
     /* ▽ の中身。かな（abbrev のときは ASCII）。 */
     char midashi[CDK_SKK_MIDASHI_MAX];
@@ -84,6 +90,9 @@ void cdk_skk_init(cdk_skk_t *s, cdk_skk_commit_fn commit, void *ctx);
 
 /* 辞書を差し替える。NULL にすると変換だけができなくなる（かな入力は動く）。 */
 void cdk_skk_set_dict(cdk_skk_t *s, const cdk_skk_dict_t *dict);
+
+/* 個人辞書を繋ぐ。確定した候補が次から先頭に出るようになる。 */
+void cdk_skk_set_user(cdk_skk_t *s, cdk_skk_user_t *user);
 
 void           cdk_skk_set_mode(cdk_skk_t *s, cdk_skk_mode_t m);
 cdk_skk_mode_t cdk_skk_get_mode(const cdk_skk_t *s);

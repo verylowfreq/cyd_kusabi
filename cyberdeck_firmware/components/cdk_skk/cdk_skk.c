@@ -1,6 +1,7 @@
 /* SKK の状態機械。仕様は cdk_skk.h の頭。 */
 #include "cdk_skk.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
@@ -162,6 +163,11 @@ void cdk_skk_set_dict(cdk_skk_t *s, const cdk_skk_dict_t *dict)
     s->dict = dict;
 }
 
+void cdk_skk_set_user(cdk_skk_t *s, cdk_skk_user_t *user)
+{
+    s->user = user;
+}
+
 void cdk_skk_set_mode(cdk_skk_t *s, cdk_skk_mode_t m)
 {
     cdk_skk_reset(s);
@@ -184,6 +190,8 @@ void cdk_skk_reset(cdk_skk_t *s)
     s->cand_index = 0;
     s->cand_count = 0;
     s->preedit[0] = '\0';
+    s->lookup_key[0] = '\0';
+    s->lookup_okuri = false;
     cdk_skk_romkana_reset(&s->rk);
 }
 
@@ -195,7 +203,7 @@ void cdk_skk_reset(cdk_skk_t *s)
 static bool start_select(cdk_skk_t *s)
 {
     s->last_lookup_failed = false;
-    if (s->dict == NULL || s->midashi[0] == '\0') {
+    if (s->midashi[0] == '\0') {
         s->last_lookup_failed = true;
         return false;
     }
@@ -209,12 +217,26 @@ static bool start_select(cdk_skk_t *s)
          * 「変換できない」ようにしか見えない。 */
         str_append(key, sizeof(key), &s->okuri_head, 1);
     }
+    /* 学習は確定のときに行うので、引いた見出しを覚えておく。 */
+    snprintf(s->lookup_key, sizeof(s->lookup_key), "%s", key);
+    s->lookup_okuri = (s->okuri_head != '\0');
 
-    if (!cdk_skk_dict_lookup(s->dict, key, s->okuri_head != '\0', s->cands,
-                             sizeof(s->cands))) {
+    const char *user_cands =
+        (s->user != NULL) ? cdk_skk_user_lookup(s->user, key, s->lookup_okuri) : NULL;
+
+    static char sys_cands[CDK_SKK_CAND_MAX];
+    sys_cands[0] = '\0';
+    const bool got_sys =
+        (s->dict != NULL) &&
+        cdk_skk_dict_lookup(s->dict, key, s->lookup_okuri, sys_cands, sizeof(sys_cands));
+
+    if (user_cands == NULL && !got_sys) {
         s->last_lookup_failed = true;
         return false;
     }
+    /* 個人辞書が先。同じ候補は本辞書側から落とす。 */
+    cdk_skk_merge_cands(user_cands, got_sys ? sys_cands : NULL, s->cands,
+                        sizeof(s->cands));
     s->cand_count = cdk_skk_cand_count(s->cands);
     if (s->cand_count == 0) {
         s->last_lookup_failed = true;
@@ -231,6 +253,10 @@ static void commit_candidate(cdk_skk_t *s)
     char cand[CDK_SKK_CAND_MAX];
     if (cdk_skk_cand_at(s->cands, s->cand_index, cand, sizeof(cand), NULL, 0)) {
         emit(s, cand, strlen(cand));
+        /* 選んだものを次から先頭に出す。ここでしか学習しない。 */
+        if (s->user != NULL && s->lookup_key[0] != '\0') {
+            cdk_skk_user_learn(s->user, s->lookup_key, s->lookup_okuri, cand);
+        }
     }
     if (s->okuri[0] != '\0') {
         emit_kana(s, s->okuri, strlen(s->okuri));

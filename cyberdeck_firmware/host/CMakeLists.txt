@@ -78,6 +78,7 @@ set(CDK_TESTS
     test_skk_romkana
     test_skk_dict
     test_skk
+    test_skk_user
 )
 
 foreach(t ${CDK_TESTS})

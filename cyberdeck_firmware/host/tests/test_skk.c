@@ -351,6 +351,52 @@ static void test_reset(void)
     T_EQ_INT(cdk_skk_get_mode(&S), CDK_SKK_HIRAGANA);
 }
 
+static void test_learning(void)
+{
+    static cdk_skk_user_entry_t store[8];
+    static cdk_skk_user_t       user;
+    cdk_skk_user_init(&user, store, 8);
+
+    T_CASE("選んだ候補が次から先頭に出る");
+    start(CDK_SKK_HIRAGANA);
+    cdk_skk_set_user(&S, &user);
+
+    /* 1 回目: 2 番目の候補を選ぶ */
+    type("Nihon  \n");
+    T_EQ_STR(COMMITTED, "二本");
+
+    /* 2 回目: Space 1 回で「二本」が出る */
+    COMMITTED[0] = '\0';
+    COMMITTED_LEN = 0;
+    type("Nihon ");
+    T_EQ_STR(cdk_skk_preedit(&S), "▼二本");
+    type(" ");
+    T_EQ_STR(cdk_skk_preedit(&S), "▼日本"); /* 本辞書側は後ろに残る */
+    type("\n");
+    T_EQ_STR(COMMITTED, "日本");
+
+    T_CASE("送りありも学習する");
+    start(CDK_SKK_HIRAGANA);
+    cdk_skk_set_user(&S, &user);
+    type("KaeRu  \n"); /* 3 番目 = 代る */
+    T_EQ_STR(COMMITTED, "代る");
+    COMMITTED[0] = '\0';
+    COMMITTED_LEN = 0;
+    type("KaeRu");
+    T_EQ_STR(cdk_skk_preedit(&S), "▼代る");
+
+    T_CASE("個人辞書だけにある語も引ける");
+    /* 本辞書に無い見出しでも、個人辞書に入っていれば変換できる。
+     * 辞書登録モードを作るまでの間、ここが唯一の追加経路になる。 */
+    cdk_skk_user_learn(&user, "そんなことば", false, "そんな言葉");
+    start(CDK_SKK_HIRAGANA);
+    cdk_skk_set_user(&S, &user);
+    type("Sonnakotoba ");
+    T_EQ_STR(cdk_skk_preedit(&S), "▼そんな言葉");
+    type("\n");
+    T_EQ_STR(COMMITTED, "そんな言葉");
+}
+
 int main(void)
 {
     if (!load_dict()) {
@@ -363,6 +409,7 @@ int main(void)
     test_convert();
     test_okuri();
     test_abbrev();
+    test_learning();
     test_reset();
     return t_report("skk");
 }

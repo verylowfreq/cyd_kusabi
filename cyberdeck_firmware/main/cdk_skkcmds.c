@@ -48,6 +48,8 @@ static int cmd_skk(int argc, char **argv, void *user)
     const int m = (int)c->skk_get_mode();
     cdk_shell_printf(sh, "モード  : %s\r\n", (m >= 0 && m < 5) ? NAMES[m] : "?");
     cdk_shell_printf(sh, "辞書    : %s\r\n", cdk_skkdict_describe());
+    cdk_shell_printf(sh, "個人辞書: %s に %d 件追記\r\n", CDK_SKK_USER_PATH,
+                     cdk_skkuser_written());
     cdk_shell_write(sh, "切り替え: Ctrl-J（cdk.py key ctrl+j）\r\n");
     return 0;
 }

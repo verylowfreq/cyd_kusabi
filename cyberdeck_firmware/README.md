@@ -3,15 +3,16 @@
 ESP32-S3 サイバーデックのファームウェア。設計は [DESIGN.md](DESIGN.md)、
 プロジェクト全体の背景は [../ABOUT.md](../ABOUT.md)。
 
-現在の到達点: **M4 完了**
+現在の到達点: **M5 完了**
 
 - M0: ビルド基盤 / ホスト側テスト / LCD 表示 / スクリーンショット転送 / 有限時間のログ取得
 - M1: VT パーサ / 東雲 12px フォント / テキストコンソール（試作機で 53桁 x 20行）
 - M2: WiFi + libssh2 による **PTY 付き SSH**。実機で `top` が動く
 - M3: 行編集つきシェル + GPIO / ADC / I2C。認証情報を NVS へ
 - M4: microSD（SPI バス共有の解決）+ ファイル系コマンド + `known_hosts` によるホスト鍵検証
+- M5: **SKK 日本語入力**。SKK-JISYO.L 全体（17.5 万語）をフラッシュに載せ、学習も残す
 
-次は M5（SKK 日本語入力）。残件は DESIGN.md §13 を参照。
+次は M6（エディタ）。残件は DESIGN.md §13 を参照。
 
 ---
 
@@ -93,19 +94,40 @@ components/        ESP-IDF に依存しない純 C コア。ホストでもビ�
   cdk_keys/          キーイベント → 端末が期待するバイト列
   cdk_screen/        セルグリッド → キャンバス描画
   cdk_shell/         行編集・履歴・補完・コマンド実行
+  cdk_skk/           SKK 日本語入力（ローマ字かな・辞書・学習）
 components_port/   ESP-IDF 依存の薄いポート層
   port_display/      BSP + esp_lcd。キャンバスをパネルへ転送
   port_link/         USB-Serial-JTAG の制御チャネル
   port_cfg/          NVS に置く設定（認証情報）
   port_net/          WiFi + SSH クライアント + known_hosts 検証
   port_periph/       GPIO / ADC / I2C
+  port_skk/          辞書をフラッシュ / SD から読む口
   port_spibus/       G35 を LCD DC と SD MISO で切り替える
   port_storage/      microSD (FATFS/SDSPI)
   libssh2/           ベンダリングした libssh2 1.11.1
 main/              起動とタスク構成だけ
 host/              ホスト側 CMake / ctest / 基準レンダラ / VT フィクスチャ
-tools/             PC 側スクリプト（cdk.py / mkfont.py）
+tools/             PC 側スクリプト（cdk.py / mkfont.py / skk_build.py）
 ```
+
+## SKK 辞書
+
+辞書はリポジトリに入れない（SKK-JISYO.L は 4.5MB あり、ライセンスも別）。
+初回だけ落としてフラッシュへ焼く:
+
+```powershell
+curl -O https://skk-dev.github.io/dict/SKK-JISYO.L.gz
+gzip -d SKK-JISYO.L.gz
+python tools/cdk.py dict SKK-JISYO.L        # バイナリ化 → skkdict へ書き込み
+```
+
+バイナリで 6.86MB。`skkdict` パーティション（8MB）に収まる。焼き先は
+ビルド済みのパーティション表から引くので、オフセットを指定しなくてよい。
+
+SD の `/sdcard/skk/SKK-JISYO.bin` があればそちらが優先される。
+学習は `/sdcard/skk/user.dic` に追記される。
+
+使い方は `skk` コマンドか `Ctrl-J`。詳細は DESIGN.md §9。
 
 ## フォント
 

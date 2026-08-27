@@ -10,6 +10,7 @@
 #pragma once
 
 #include "cdk_skk_dict.h"
+#include "cdk_skk_user.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -33,6 +34,18 @@ cdk_skk_src_t cdk_skkdict_source(void);
 
 /* 開いている辞書の説明（画面に出す用）。開いていなければ "なし"。 */
 const char *cdk_skkdict_describe(void);
+
+/* ---- 個人辞書 ---- */
+
+#define CDK_SKK_USER_PATH "/sdcard/skk/user.dic"
+
+/* SD 上の user.dic を読み込み、以降の学習を追記するようにする。
+ * SD が無ければ何もしない（学習は RAM 上だけで働き、再起動で消える）。
+ * 読み込んだ件数を返す。 */
+int cdk_skkuser_attach(cdk_skk_user_t *u);
+
+/* 学習した件数（この起動での追記回数）。 */
+int cdk_skkuser_written(void);
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static const char *TAG = "cdk_skkdict";
 
@@ -109,6 +110,70 @@ esp_err_t cdk_skkdict_open(cdk_skk_dict_t *d)
 cdk_skk_src_t cdk_skkdict_source(void)
 {
     return s_src;
+}
+
+/* ------------------------------------------------------------------ */
+/* 個人辞書                                                            */
+/* ------------------------------------------------------------------ */
+
+static int s_user_written;
+
+/* 学習のたびに 1 行追記する。全体を書き直さないのは、書いている途中で
+ * 電源が落ちたときに辞書ごと失うのを避けるため。
+ *
+ * ここは**描画の外**から呼ばれる（route_key → 確定 → ここ → その後で描画）。
+ * 描画中に SD を触ると LCD と SPI を奪い合う。 */
+static void user_persist(void *ctx, const char *line, size_t len)
+{
+    (void)ctx;
+    if (!cdk_sd_mounted()) {
+        return;
+    }
+    cdk_sd_lock();
+    FILE *f = fopen(CDK_SKK_USER_PATH, "ab");
+    if (f != NULL) {
+        if (fwrite(line, 1, len, f) == len) {
+            s_user_written++;
+        }
+        fclose(f);
+    }
+    cdk_sd_unlock();
+}
+
+int cdk_skkuser_attach(cdk_skk_user_t *u)
+{
+    s_user_written = 0;
+    if (!cdk_sd_mounted()) {
+        ESP_LOGW(TAG, "SD が無いので学習を残せません");
+        return 0;
+    }
+
+    cdk_sd_lock();
+    mkdir("/sdcard/skk", 0777); /* 既にあってもよい */
+    FILE *f = fopen(CDK_SKK_USER_PATH, "rb");
+    cdk_sd_unlock();
+
+    int loaded = 0;
+    if (f != NULL) {
+        char line[CDK_SKK_USER_LINE_MAX];
+        cdk_sd_lock();
+        while (fgets(line, sizeof(line), f) != NULL) {
+            if (cdk_skk_user_feed_line(u, line)) {
+                loaded++;
+            }
+        }
+        fclose(f);
+        cdk_sd_unlock();
+        ESP_LOGI(TAG, "%s から %d 件", CDK_SKK_USER_PATH, loaded);
+    }
+
+    cdk_skk_user_set_persist(u, user_persist, NULL);
+    return loaded;
+}
+
+int cdk_skkuser_written(void)
+{
+    return s_user_written;
 }
 
 const char *cdk_skkdict_describe(void)
