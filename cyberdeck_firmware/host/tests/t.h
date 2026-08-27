@@ -52,6 +52,22 @@ static const char *t_current = "";
         }                                                                      \
     } while (0)
 
+/* 文字列は中身を出さないと直せない。UTF-8 のまま表示する。 */
+#define T_EQ_STR(a, b)                                                         \
+    do {                                                                       \
+        t_checks++;                                                            \
+        const char *_a = (a);                                                  \
+        const char *_b = (b);                                                  \
+        if (_a == NULL || _b == NULL || strcmp(_a, _b) != 0) {                 \
+            t_failures++;                                                      \
+            printf("   FAIL %s:%d [%s] %s == %s\n        got      \"%s\"\n"    \
+                   "        expected \"%s\"\n",                                \
+                   __FILE__, __LINE__, t_current, #a, #b,                      \
+                   (_a != NULL) ? _a : "(null)",                               \
+                   (_b != NULL) ? _b : "(null)");                              \
+        }                                                                      \
+    } while (0)
+
 #define T_EQ_MEM(a, b, n)                                                      \
     do {                                                                       \
         t_checks++;                                                            \
