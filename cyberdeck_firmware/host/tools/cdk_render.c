@@ -1,7 +1,12 @@
 /* cdk_render — 実機のスクリーンショットと突き合わせるための基準画像を吐く。
  *
  *   cdk_render testpattern <width> <height> <out.raw>
- *   cdk_render vt <input.vt> <width> <height> <out.raw>
+ *   cdk_render vt <input.vt> <width> <height> <out.raw> [preedit.txt]
+ *
+ * preedit.txt は日本語入力の未確定文字列（UTF-8）。実機の SKK が出して
+ * いるものと同じ文字列を渡すと、重ね描きまで含めて比較できる。
+ * 引数ではなくファイルで渡すのは、Windows の main() が argv を ANSI
+ * コードページで渡してきて日本語が壊れるため。
  *
  * 出力は RGB565 リトルエンディアンの生バイト列 (width*height*2 バイト)。
  * 実機が送ってくる SHOT_DATA と 1 バイト違わず一致するはず。
@@ -24,7 +29,7 @@ static int usage(void)
     fprintf(stderr,
             "usage:\n"
             "  cdk_render testpattern <width> <height> <out.raw>\n"
-            "  cdk_render vt <input.vt> <width> <height> <out.raw>\n");
+            "  cdk_render vt <input.vt> <width> <height> <out.raw> [preedit.txt]\n");
     return 2;
 }
 
@@ -92,7 +97,8 @@ static int render_testpattern(int w, int h, const char *out)
     return rc;
 }
 
-static int render_vt(const char *in_path, int w, int h, const char *out)
+static int render_vt(const char *in_path, int w, int h, const char *out,
+                     const char *preedit_path)
 {
     size_t font_len = 0;
     uint8_t *font_blob = slurp(CDK_FONT_BLOB_PATH, &font_len);
@@ -117,6 +123,24 @@ static int render_vt(const char *in_path, int w, int h, const char *out)
 
     cdk_screen_t screen;
     cdk_screen_init(&screen, &font);
+
+    if (preedit_path != NULL) {
+        size_t   pre_len = 0;
+        uint8_t *pre = slurp(preedit_path, &pre_len);
+        if (pre == NULL) {
+            fprintf(stderr, "cdk_render: 未確定文字列を開けません: %s\n", preedit_path);
+            free(in);
+            free(font_blob);
+            return 1;
+        }
+        while (pre_len > 0 && (pre[pre_len - 1] == '\n' || pre[pre_len - 1] == '\r')) {
+            pre_len--;
+        }
+        pre[pre_len] = '\0';
+        cdk_screen_set_preedit(&screen, (const char *)pre);
+        free(pre);
+    }
+
     const int cols = cdk_screen_cols(&screen, w);
     const int rows = cdk_screen_rows(&screen, h);
     if (cols <= 0 || rows <= 0) {
@@ -175,14 +199,14 @@ int main(int argc, char **argv)
         return render_testpattern(w, h, argv[4]);
     }
 
-    if (strcmp(argv[1], "vt") == 0 && argc == 6) {
+    if (strcmp(argv[1], "vt") == 0 && (argc == 6 || argc == 7)) {
         const int w = atoi(argv[3]);
         const int h = atoi(argv[4]);
         if (w <= 0 || h <= 0 || w > 4096 || h > 4096) {
             fprintf(stderr, "cdk_render: 解像度が不正です: %dx%d\n", w, h);
             return 2;
         }
-        return render_vt(argv[2], w, h, argv[5]);
+        return render_vt(argv[2], w, h, argv[5], (argc == 7) ? argv[6] : NULL);
     }
 
     return usage();

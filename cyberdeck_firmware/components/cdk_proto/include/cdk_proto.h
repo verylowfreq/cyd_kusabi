@@ -47,6 +47,10 @@ typedef enum {
 
     CDK_MSG_KEY       = 0x10, /* host -> dev : cdk_wire_key_t */
     CDK_MSG_TEXT      = 0x11, /* host -> dev : UTF-8 テキストをそのまま入力扱い */
+    /* host -> dev : バイト列を**端末へ直接**流す（入力ではない）。
+     * 画面を確定的な状態に置くための検証用。TEXT はキー入力として
+     * シェルや SSH に届くので、画面をホストと突き合わせる用途には使えない。 */
+    CDK_MSG_VT        = 0x12,
 
     CDK_MSG_SHOT_REQ  = 0x20, /* host -> dev : payload なし */
     CDK_MSG_SHOT_INFO = 0x21, /* dev -> host : cdk_wire_shot_info_t */

@@ -7,6 +7,7 @@
 #pragma once
 
 #include "cdk_shell.h"
+#include "cdk_skk.h"
 #include "cdk_term.h"
 
 typedef struct {
@@ -22,6 +23,11 @@ typedef struct {
     void (*ssh_close)(void);
     bool (*ssh_is_open)(void);
 
+    /* 日本語入力。状態は main.c が 1 つだけ持つ。 */
+    void                  (*skk_set_mode)(cdk_skk_mode_t m);
+    cdk_skk_mode_t        (*skk_get_mode)(void);
+    const cdk_skk_dict_t *(*skk_dict)(void);
+
     void (*reboot)(void);
 } app_ctx_t;
 
@@ -31,3 +37,6 @@ extern const size_t          APP_COMMANDS_COUNT;
 
 extern const cdk_shell_cmd_t APP_FS_COMMANDS[];
 extern const size_t          APP_FS_COMMANDS_COUNT;
+
+extern const cdk_shell_cmd_t APP_SKK_COMMANDS[];
+extern const size_t          APP_SKK_COMMANDS_COUNT;

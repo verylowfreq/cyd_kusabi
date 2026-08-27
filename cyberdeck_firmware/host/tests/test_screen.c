@@ -239,6 +239,104 @@ int main(void)
         T_CHECK(true);
     }
 
+    /* ---- 未確定文字列（日本語入力のプリエディット） ---- */
+
+    T_CASE("未確定文字列をカーソル位置に重ねる");
+    {
+        setup();
+        feed("ab");
+        T.cursor_visible = false;
+        cdk_screen_set_preedit(&S, "▽");
+        cdk_screen_draw(&S, &CV, &T, true);
+
+        /* 反転表示なので、地の色と字の色が入れ替わる */
+        T_CHECK(count_color(2, 0, 1, S.default_fg) > 0); /* 反転した背景 */
+        /* 手前の 2 桁は元のまま */
+        T_CHECK(count_color(0, 0, 1, S.default_fg) > 0);
+        T_EQ_INT(count_color(0, 0, 1, S.default_fg) +
+                     count_color(0, 0, 1, S.default_bg),
+                 CW * CH);
+    }
+
+    T_CASE("全角は 2 桁を占める");
+    {
+        /* ▽ は半角、かなは全角。桁数を取り違えると
+         * 未確定文字列の右にある字を巻き込んで消す。 */
+        setup();
+        T.cursor_visible = false;
+        cdk_screen_set_preedit(&S, "▽に");
+        cdk_screen_draw(&S, &CV, &T, true);
+
+        /* 0 桁目 = ▽（半角・反転） 1..2 桁目 = に（全角・反転） */
+        T_CHECK(count_color(0, 0, 1, S.default_fg) > 0);
+        T_CHECK(count_color(1, 0, 2, S.default_fg) > 0);
+        /* 3 桁目からは手つかず = 背景のまま */
+        T_EQ_INT(count_color(3, 0, 1, S.default_bg), CW * CH);
+    }
+
+    T_CASE("短くなったら余りが消える");
+    {
+        setup();
+        T.cursor_visible = false;
+        cdk_screen_set_preedit(&S, "▽にほん");
+        cdk_screen_draw(&S, &CV, &T, true);
+        T_CHECK(count_color(5, 0, 2, S.default_fg) > 0); /* 「ん」があった */
+
+        cdk_screen_set_preedit(&S, "▽に");
+        cdk_screen_draw(&S, &CV, &T, false); /* ダーティ行だけ描いても消えること */
+        T_EQ_INT(count_color(5, 0, 2, S.default_bg), CW * CH * 2);
+    }
+
+    T_CASE("空にすると跡形も無くなる");
+    {
+        setup();
+        T.cursor_visible = false;
+        feed("hello");
+        cdk_screen_set_preedit(&S, "▽に");
+        cdk_screen_draw(&S, &CV, &T, true);
+        cdk_screen_set_preedit(&S, "");
+        cdk_screen_draw(&S, &CV, &T, false);
+
+        /* 元の "hello" が戻っている（5 桁目 'o' の位置に字がある） */
+        T_CHECK(count_color(4, 0, 1, S.default_fg) > 0);
+        T_CHECK(count_color(4, 0, 1, S.default_bg) > 0);
+    }
+
+    T_CASE("右端に収まらないときは左へ寄せる");
+    {
+        /* 折り返して下の行を潰すより、左へ寄せて全部見せる。
+         * 何を入力しているのか見えないほうが困る。 */
+        setup();
+        T.cursor_visible = false;
+        T.cx = COLS - 2; /* 残り 2 桁しかない */
+        cdk_screen_set_preedit(&S, "▽にほ");
+        cdk_screen_draw(&S, &CV, &T, true);
+
+        /* 右端 5 桁 (▽ 1 + かな 2 + かな 2) が使われている */
+        T_CHECK(count_color(COLS - 5, 0, 1, S.default_fg) > 0);
+        T_CHECK(count_color(COLS - 1, 0, 1, S.default_fg) > 0);
+        /* その左は手つかず */
+        T_EQ_INT(count_color(COLS - 6, 0, 1, S.default_bg), CW * CH);
+    }
+
+    T_CASE("長すぎる未確定文字列は後ろを残す");
+    {
+        setup();
+        char longstr[512];
+        longstr[0] = '\0';
+        for (int i = 0; i < 60; i++) {
+            strcat(longstr, "あ");
+        }
+        strcat(longstr, "END");
+        cdk_screen_set_preedit(&S, longstr);
+        /* いま打っている端（末尾）が残っていること */
+        const char *p = S.preedit;
+        T_CHECK(strlen(p) < sizeof(S.preedit));
+        T_CHECK(strcmp(p + strlen(p) - 3, "END") == 0);
+        /* UTF-8 の途中で切っていないこと */
+        T_CHECK(((unsigned char)p[0] & 0xC0u) != 0x80u);
+    }
+
     free(blob);
     return t_report("test_screen");
 }

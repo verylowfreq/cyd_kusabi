@@ -22,6 +22,8 @@
 #include "cdk_proto.h"
 #include "cdk_screen.h"
 #include "cdk_shell.h"
+#include "cdk_skk.h"
+#include "cdk_skkdict_src.h"
 #include "cdk_storage.h"
 #include "cdk_term.h"
 
@@ -66,6 +68,9 @@ static cdk_shell_t        s_shell;
 static cdk_keys_decoder_t s_keydec;
 static app_ctx_t          s_ctx;
 
+static cdk_skk_t          s_skk;
+static cdk_skk_dict_t     s_skkdict;
+
 /* ------------------------------------------------------------------ */
 /* セッション                                                          */
 /* ------------------------------------------------------------------ */
@@ -77,9 +82,19 @@ typedef enum {
 
 static session_t s_session = SESSION_SHELL;
 
+/* 画面の持ち主が変わるときは入力中のものを捨てる。
+ * 残すと、次の持ち主の画面に前の ▽ が出たままになる。 */
+static void drop_preedit(void)
+{
+    cdk_skk_reset(&s_skk);
+    cdk_screen_set_preedit(&s_screen, "");
+    s_dirty = true;
+}
+
 static void enter_shell(void)
 {
     s_session = SESSION_SHELL;
+    drop_preedit();
     cdk_shell_begin(&s_shell);
     s_dirty = true;
 }
@@ -87,13 +102,45 @@ static void enter_shell(void)
 static void enter_ssh(void)
 {
     s_session = SESSION_SSH;
+    drop_preedit();
     cdk_shell_end(&s_shell);
+}
+
+/* SKK が確定した文字列。シェルにも SSH にも同じ道を通す。 */
+static void skk_commit(void *ctx, const char *utf8, size_t len)
+{
+    (void)ctx;
+    if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
+        (void)cdk_ssh_write((const uint8_t *)utf8, len);
+        return;
+    }
+    /* シェルは キーイベント しか見ない。確定した文字列を
+     * コードポイントに割ってから渡す。 */
+    cdk_utf8_t dec = {0};
+    for (size_t i = 0; i < len; i++) {
+        uint32_t cp = 0;
+        bool     retry = false;
+        if (cdk_utf8_feed(&dec, (uint8_t)utf8[i], &cp, &retry) == CDK_UTF8_OK) {
+            const cdk_key_t k = {0, 0, cp};
+            cdk_shell_key(&s_shell, &k);
+        }
+    }
 }
 
 /* キーの行き先を決める唯一の場所。 */
 static void route_key(void *user, const cdk_key_t *k)
 {
     (void)user;
+
+    /* 日本語入力はシェル / SSH の分岐より**前**に置く。ここを分岐の
+     * 3 本目にすると「このキーは誰が受け取るのか」が追えなくなる。
+     * 消費されなかったキーだけが下へ落ちる。 */
+    if (cdk_skk_key(&s_skk, k)) {
+        cdk_screen_set_preedit(&s_screen, cdk_skk_preedit(&s_skk));
+        s_dirty = true;
+        return;
+    }
+    cdk_screen_set_preedit(&s_screen, cdk_skk_preedit(&s_skk));
 
     if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
         uint8_t out[16];
@@ -182,6 +229,24 @@ static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t 
 
     case CDK_MSG_TEXT:
         route_bytes(payload, len);
+        break;
+
+    /* 画面をホストの基準画像と突き合わせるための入口。
+     * 端末を初期化してから流すので、起動時の WiFi/SD の状態表示が
+     * 残らない。TEXT では入力として扱われてシェルに届いてしまうので、
+     * 画面の検証には使えない。 */
+    case CDK_MSG_VT:
+        if (len >= 1) {
+            /* 先頭 1 バイトがフラグ。bit0 で端末を初期化する。
+             * 分割して送るときに毎回初期化すると前半が消えるので、
+             * 「どのフレームが先頭か」を送り側に言わせる。 */
+            if ((payload[0] & 0x01u) != 0u) {
+                drop_preedit();
+                cdk_term_reset(&s_term);
+            }
+            cdk_term_feed(&s_term, payload + 1, len - 1);
+            s_dirty = true;
+        }
         break;
 
     case CDK_MSG_KEY:
@@ -350,6 +415,23 @@ static bool app_ssh_is_open(void)
     return cdk_ssh_is_open();
 }
 
+static void app_skk_set_mode(cdk_skk_mode_t m)
+{
+    cdk_skk_set_mode(&s_skk, m);
+    cdk_screen_set_preedit(&s_screen, cdk_skk_preedit(&s_skk));
+    s_dirty = true;
+}
+
+static cdk_skk_mode_t app_skk_get_mode(void)
+{
+    return cdk_skk_get_mode(&s_skk);
+}
+
+static const cdk_skk_dict_t *app_skk_dict(void)
+{
+    return &s_skkdict;
+}
+
 static void app_reboot(void)
 {
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -412,6 +494,9 @@ void app_main(void)
         .ssh_open = app_ssh_open,
         .ssh_close = app_ssh_close,
         .ssh_is_open = app_ssh_is_open,
+        .skk_set_mode = app_skk_set_mode,
+        .skk_get_mode = app_skk_get_mode,
+        .skk_dict = app_skk_dict,
         .reboot = app_reboot,
     };
     /* 2 つのコマンド表を繋いで渡す。help は登録された表をそのまま見る。 */
@@ -422,6 +507,9 @@ void app_main(void)
     }
     for (size_t i = 0; i < APP_FS_COMMANDS_COUNT && ncmds < 32; i++) {
         all_cmds[ncmds++] = APP_FS_COMMANDS[i];
+    }
+    for (size_t i = 0; i < APP_SKK_COMMANDS_COUNT && ncmds < 32; i++) {
+        all_cmds[ncmds++] = APP_SKK_COMMANDS[i];
     }
     cdk_shell_set_commands(&s_shell, all_cmds, ncmds, &s_ctx);
 
@@ -438,6 +526,19 @@ void app_main(void)
                     (unsigned long long)(cap / (1024ULL * 1024ULL)));
     } else {
         term_printf("\033[33msd    : 見つかりません\033[0m\r\n");
+    }
+
+    /* 日本語入力。辞書は SD が優先で、無ければフラッシュの skkdict。
+     * SD のマウントより後に開くこと。順番を逆にすると、SD に辞書を
+     * 置いてもフラッシュのほうが使われる。 */
+    cdk_skk_init(&s_skk, skk_commit, NULL);
+    if (cdk_skkdict_open(&s_skkdict) == ESP_OK) {
+        cdk_skk_set_dict(&s_skk, &s_skkdict);
+        term_printf("skk   : \033[32m送りあり%lu 送りなし%lu\033[0m\r\n",
+                    (unsigned long)s_skkdict.ari_count,
+                    (unsigned long)s_skkdict.nasi_count);
+    } else {
+        term_printf("\033[33mskk   : 辞書がありません\033[0m\r\n");
     }
 
     /* 起動時に WiFi まで繋いでおく。SSH は `ssh` コマンドで入る。

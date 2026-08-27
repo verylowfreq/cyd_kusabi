@@ -1,8 +1,15 @@
 # 16MB フラッシュ。gen_esp32part.py --flash-size 16MB で検証済み。
-# 0xc10000 以降 約4MB が空き。将来 OTA が必要になったらここを ota_1 にする。
-# Name,     Type, SubType, Offset,  Size
-nvs,        data, nvs,     ,        24K
-phy_init,   data, phy,     ,        4K
-factory,    app,  factory, ,        4M
-skkdict,    data, 0x40,    ,        4M
-storage,    data, fat,     ,        4M
+#
+# skkdict は SKK-JISYO.L 全体（バイナリで約 6.5MB）を入れるので 8MB 要る。
+# 4MB では入らず、SD にしか置けなくなる。SD 上のファイルは実機に挿さないと
+# 用意できないので、辞書をフラッシュに焼けるかどうかは開発の回し方に直結する。
+#
+# nvs と phy_init は factory より前なので、ここを広げても位置が動かない。
+# 認証情報は残る（実機で確認済み）。
+#
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     ,         24K
+phy_init,   data, phy,     ,         4K
+factory,    app,  factory, 0x010000, 4M
+skkdict,    data, 0x40,    0x410000, 8M
+storage,    data, fat,     0xC10000, 4032K

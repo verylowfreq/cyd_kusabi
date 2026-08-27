@@ -55,6 +55,7 @@ for _s in (sys.stdout, sys.stderr):
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 BUILD_DIR = PROJECT_DIR / "build"
 HOST_BUILD_DIR = PROJECT_DIR / "build-host"
+TOOLS_DIR = PROJECT_DIR / "tools"
 IDF_PATH = Path(os.environ.get("IDF_PATH", r"C:\DATA-0\Espressif\esp-idf-v5.5.5"))
 
 DEFAULT_CTRL = os.environ.get("CDK_CTRL", "COM22")
@@ -76,6 +77,7 @@ MSG_READY = 0x03
 MSG_LOG = 0x04
 MSG_KEY = 0x10
 MSG_TEXT = 0x11
+MSG_VT = 0x12
 MSG_SHOT_REQ = 0x20
 MSG_SHOT_INFO = 0x21
 MSG_SHOT_DATA = 0x22
@@ -392,12 +394,14 @@ def cmd_shot(args) -> int:
         Path(args.raw).write_bytes(raw)
 
     if args.verify or args.verify_vt:
-        return verify_against_reference(raw, width, height, out, args.verify_vt)
+        return verify_against_reference(raw, width, height, out, args.verify_vt,
+                                        getattr(args, "preedit", None))
     return 0
 
 
 def verify_against_reference(raw: bytes, width: int, height: int, png_path: Path,
-                             vt_file: str | None = None) -> int:
+                             vt_file: str | None = None,
+                             preedit_file: str | None = None) -> int:
     """ホスト側で同じ内容を描いてバイト単位で比較する。
 
     実機と PC で同じ純 C コードを動かしているので、一致しないなら
@@ -421,6 +425,10 @@ def verify_against_reference(raw: bytes, width: int, height: int, png_path: Path
     if vt_file:
         ref_path = HOST_BUILD_DIR / f"ref_vt_{width}x{height}.raw"
         cmd = [str(exe), "vt", str(vt_file), str(width), str(height), str(ref_path)]
+        if preedit_file:
+            # 未確定文字列は引数ではなくファイルで渡す。Windows の argv は
+            # ANSI コードページなので、日本語がここで壊れる。
+            cmd.append(str(preedit_file))
     else:
         ref_path = HOST_BUILD_DIR / f"ref_{width}x{height}.raw"
         cmd = [str(exe), "testpattern", str(width), str(height), str(ref_path)]
@@ -500,6 +508,31 @@ def cmd_type(args) -> int:
     return 0
 
 
+def cmd_vt(args) -> int:
+    """バイト列を端末へ直接流して画面を確定的な状態にする。
+
+    type は「入力」なのでシェルや SSH に届く。画面をホストの基準画像と
+    比べたいときは、端末を初期化してから同じバイト列を流す必要がある。
+    起動直後の画面には WiFi の IP や SD のカード名が出るので、
+    そのままでは基準画像と一致しない（M2 以降 selftest が通っていなかった）。
+    """
+    data = Path(args.file).read_bytes()
+    ctrl = Ctrl(args.ctrl)
+    try:
+        # 先頭 1 バイトはフラグ。bit0 を立てたフレームだけが端末を初期化する。
+        # 分割送信で毎回初期化されると前半が消える。
+        chunk = MAX_PAYLOAD - 1
+        first = True
+        for i in range(0, max(len(data), 1), chunk):
+            ctrl.send(MSG_VT, bytes([1 if first else 0]) + data[i : i + chunk])
+            first = False
+            time.sleep(0.01)
+    finally:
+        ctrl.close()
+    print(f"[cdk] {args.file} を端末へ流しました ({len(data)} バイト)")
+    return 0
+
+
 def cmd_flash(args) -> int:
     """ビルド済みのバイナリを esptool で書き込む。IDF 環境の有効化は要らない。"""
     args_file = BUILD_DIR / "flash_args"
@@ -520,6 +553,73 @@ def cmd_flash(args) -> int:
     print("[cdk] " + " ".join(cmd))
     r = subprocess.run(cmd, cwd=BUILD_DIR)
     return r.returncode
+
+
+def partition_offset(name: str) -> tuple[int, int] | None:
+    """ビルド済みのパーティション表から (offset, size) を読む。
+
+    オフセットを決め打ちにしない。partitions.csv を編集した瞬間に
+    「焼けたのに読めない」という分かりにくい壊れ方をするため。
+    """
+    csv = BUILD_DIR / "partition_table" / "partition-table.bin"
+    if not csv.exists():
+        return None
+    blob = csv.read_bytes()
+    for i in range(0, len(blob), 32):
+        e = blob[i:i + 32]
+        if len(e) < 32 or e[0:2] != b"\xaa\x50":
+            continue
+        label = e[12:28].split(b"\x00")[0].decode("ascii", "replace")
+        if label == name:
+            off, size = struct.unpack_from("<II", e, 4)
+            return off, size
+    return None
+
+
+def cmd_dict(args) -> int:
+    """SKK 辞書をバイナリ化して skkdict パーティションへ焼く。"""
+    out = Path(args.out) if args.out else (BUILD_DIR / "skkdict.bin")
+
+    if args.input:
+        build = [sys.executable, str(TOOLS_DIR / "skk_build.py"), str(args.input),
+                 "-o", str(out), "--encoding", args.encoding]
+        if args.no_annotations:
+            build.append("--no-annotations")
+        print("[cdk] " + " ".join(build))
+        if subprocess.run(build).returncode != 0:
+            return 1
+
+    if not out.exists():
+        print(f"[cdk] {out} がありません。入力辞書を指定してください。", file=sys.stderr)
+        return 1
+
+    part = partition_offset("skkdict")
+    if part is None:
+        print("[cdk] skkdict パーティションが見つかりません。先に idf.py build を。",
+              file=sys.stderr)
+        return 1
+    off, size = part
+    blob_len = out.stat().st_size
+    print(f"[cdk] skkdict @0x{off:06X} {size:,} バイト / 辞書 {blob_len:,} バイト")
+    if blob_len > size:
+        print(f"[cdk] 辞書がパーティションに入りません（{blob_len - size:,} バイト超過）。"
+              "partitions.csv を広げるか --no-annotations を使ってください。",
+              file=sys.stderr)
+        return 1
+    if args.build_only:
+        return 0
+
+    cmd = [
+        sys.executable, "-m", "esptool",
+        "--chip", "esp32s3",
+        "--port", args.ctrl,
+        "--baud", str(args.baud),
+        "--before", "default_reset",
+        "--after", "hard_reset",
+        "write_flash", hex(off), str(out),
+    ]
+    print("[cdk] " + " ".join(cmd))
+    return subprocess.run(cmd).returncode
 
 
 def cmd_build(args) -> int:
@@ -569,10 +669,19 @@ def cmd_selftest(args) -> int:
     print("== ping ==")
     if cmd_ping(args) != 0:
         return 1
+    print("== vt banner ==")
+    # 起動直後の画面には WiFi の IP や SD のカード名が出るので、
+    # そのままでは基準画像と一致しない。端末を作り直してから比べる。
+    args.file = str(PROJECT_DIR / "host" / "fixtures" / "vt" / "banner.vt")
+    if cmd_vt(args) != 0:
+        return 1
+    time.sleep(0.3)
+
     print("== shot --verify-vt banner ==")
     args.out = str(PROJECT_DIR / "shot.png")
     args.verify = False
     args.verify_vt = str(PROJECT_DIR / "host" / "fixtures" / "vt" / "banner.vt")
+    args.preedit = None
     args.raw = None
     return cmd_shot(args)
 
@@ -646,6 +755,8 @@ def main() -> int:
     p.add_argument("--verify", action="store_true", help="テストパターンの基準画像と比較")
     p.add_argument("--verify-vt", default=None, metavar="FILE",
                    help="VT フィクスチャをホストで描いた結果と比較")
+    p.add_argument("--preedit", default=None, metavar="FILE",
+                   help="日本語入力の未確定文字列を書いたファイル（--verify-vt と併用）")
     p.add_argument("--raw", default=None, help="生の RGB565 も保存する")
     p.set_defaults(func=cmd_shot)
 
@@ -663,6 +774,20 @@ def main() -> int:
     p = sub.add_parser("flash", help="ビルド済みバイナリを書き込む")
     p.add_argument("--baud", type=int, default=921600)
     p.set_defaults(func=cmd_flash)
+
+    p = sub.add_parser("vt", help="端末を初期化してバイト列を流す（画面検証用）")
+    p.add_argument("file")
+    p.set_defaults(func=cmd_vt)
+
+    p = sub.add_parser("dict", help="SKK 辞書を作って skkdict へ焼く")
+    p.add_argument("input", nargs="?", default=None,
+                   help="SKK-JISYO.L など。省略すると既存の .bin をそのまま焼く")
+    p.add_argument("-o", "--out", default=None, help="中間の .bin (既定 build/skkdict.bin)")
+    p.add_argument("--encoding", default="euc_jp")
+    p.add_argument("--no-annotations", action="store_true")
+    p.add_argument("--build-only", action="store_true", help="焼かずに作るだけ")
+    p.add_argument("--baud", type=int, default=921600)
+    p.set_defaults(func=cmd_dict)
 
     p = sub.add_parser("cam", help="実機のパネルをカメラで撮る")
     p.add_argument("out", nargs="?", default="camera.jpg")

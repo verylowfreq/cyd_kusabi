@@ -31,6 +31,19 @@ typedef struct {
     int last_cx;
     int last_cy;
     bool cursor_drawn;
+
+    /* 未確定文字列（日本語入力のプリエディット）。
+     *
+     * **セルグリッドの上に重ねて描く処理をここに置くのは意図的。**
+     * 実機側だけで別に描くと、ホストの基準レンダラ (cdk_render) が
+     * 同じ絵を作れなくなり、`shot --verify` の突き合わせから外れる。
+     * ▽ ▼ * は mkfont.py が半角として自前生成している字なので、
+     * 桁ずれが起きるならまさにここ。検証の外に出したくない。 */
+    char preedit[128];
+    bool preedit_changed;
+    int  preedit_row;   /* 前回描いた行。消すときにダーティにする */
+    int  preedit_cells; /* 前回描いた桁数 */
+    bool preedit_drawn;
 } cdk_screen_t;
 
 void cdk_screen_init(cdk_screen_t *s, const cdk_font_t *font);
@@ -42,6 +55,10 @@ int cdk_screen_rows(const cdk_screen_t *s, int canvas_h);
 /* ダーティ行だけを描き、端末側のダーティを消す。
  * all を立てると全行を描く。 */
 void cdk_screen_draw(cdk_screen_t *s, cdk_canvas_t *cv, cdk_term_t *t, bool all);
+
+/* 未確定文字列を差し替える。NULL か "" で消える。
+ * カーソル位置から反転表示で重なる。右端に収まらないときは左へ寄せる。 */
+void cdk_screen_set_preedit(cdk_screen_t *s, const char *utf8);
 
 /* 1 セルを描く。テストと部分更新用。 */
 void cdk_screen_draw_cell(const cdk_screen_t *s, cdk_canvas_t *cv,

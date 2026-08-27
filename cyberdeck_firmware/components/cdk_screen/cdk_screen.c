@@ -132,8 +132,113 @@ void cdk_screen_draw_cell(const cdk_screen_t *s, cdk_canvas_t *cv,
     }
 }
 
+void cdk_screen_set_preedit(cdk_screen_t *s, const char *utf8)
+{
+    if (utf8 == NULL) {
+        utf8 = "";
+    }
+    if (strcmp(s->preedit, utf8) == 0) {
+        return;
+    }
+    size_t n = strlen(utf8);
+    if (n >= sizeof(s->preedit)) {
+        /* 入りきらないときは**後ろ**を残す。いま打っている端が見えないと
+         * 何を入力しているのか分からなくなるため。UTF-8 の途中で切らない。 */
+        size_t skip = n - (sizeof(s->preedit) - 1);
+        while (skip < n && ((unsigned char)utf8[skip] & 0xC0u) == 0x80u) {
+            skip++;
+        }
+        utf8 += skip;
+        n -= skip;
+    }
+    memcpy(s->preedit, utf8, n);
+    s->preedit[n] = '\0';
+    s->preedit_changed = true;
+}
+
+/* 未確定文字列の桁数を数える。全角は 2 桁。 */
+static int preedit_cells(const char *s)
+{
+    cdk_utf8_t dec = {0};
+    int        cells = 0;
+    for (const char *p = s; *p != '\0'; p++) {
+        uint32_t cp = 0;
+        bool     retry = false;
+        if (cdk_utf8_feed(&dec, (uint8_t)*p, &cp, &retry) == CDK_UTF8_OK) {
+            cells += cdk_char_width(cp);
+        }
+    }
+    return cells;
+}
+
+/* カーソル位置から未確定文字列を重ねて描く。 */
+static void draw_preedit(cdk_screen_t *s, cdk_canvas_t *cv, cdk_term_t *t)
+{
+    const int cols = cdk_screen_cols(s, cv->w);
+    const int rows = cdk_screen_rows(s, cv->h);
+    if (cols <= 0 || rows <= 0) {
+        return;
+    }
+
+    const int width = preedit_cells(s->preedit);
+    int       row = (t->cy < rows) ? t->cy : rows - 1;
+    int       col = t->cx;
+
+    /* 右端に収まらないなら左へ寄せる。行をまたいで折り返すと、
+     * 下の行の内容を消したうえに復帰が面倒になる。 */
+    if (col + width > cols) {
+        col = cols - width;
+    }
+    if (col < 0) {
+        col = 0;
+    }
+
+    cdk_utf8_t dec = {0};
+    int        x = col;
+    for (const char *p = s->preedit; *p != '\0'; p++) {
+        uint32_t cp = 0;
+        bool     retry = false;
+        if (cdk_utf8_feed(&dec, (uint8_t)*p, &cp, &retry) != CDK_UTF8_OK) {
+            continue;
+        }
+        const int w = cdk_char_width(cp);
+        if (x + w > cols) {
+            break;
+        }
+        cdk_cell_t cell = {0};
+        cell.cp = cp;
+        cell.fg = s->default_fg;
+        cell.bg = s->default_bg;
+        cell.attr = CDK_ATTR_REVERSE;
+        if (w == 2) {
+            cell.attr |= CDK_ATTR_WIDE_LEAD;
+        }
+        cdk_screen_draw_cell(s, cv, &cell, x, row, false);
+        x += w;
+    }
+
+    s->preedit_row = row;
+    s->preedit_cells = width;
+    s->preedit_drawn = true;
+}
+
 void cdk_screen_draw(cdk_screen_t *s, cdk_canvas_t *cv, cdk_term_t *t, bool all)
 {
+    /* 未確定文字列が変わったら、前に描いた行と今の行を描き直す。
+     * 前の行を消し忘れると、短くなったぶんの字が画面に残る。 */
+    if (s->preedit_changed) {
+        if (s->preedit_drawn && s->preedit_row >= 0 && s->preedit_row < t->rows) {
+            cdk_term_mark_row(t, s->preedit_row);
+        }
+        if (t->cy >= 0 && t->cy < t->rows) {
+            cdk_term_mark_row(t, t->cy);
+        }
+        s->preedit_changed = false;
+        if (s->preedit[0] == '\0') {
+            s->preedit_drawn = false;
+        }
+    }
+
     /* カーソルが動いたら、前にいた行（残像を消す）と今いる行（新しく描く）の
      * 両方をダーティにする。移動先が他の理由でダーティでないと描かれない。 */
     if (s->last_cx != t->cx || s->last_cy != t->cy ||
@@ -160,6 +265,12 @@ void cdk_screen_draw(cdk_screen_t *s, cdk_canvas_t *cv, cdk_term_t *t, bool all)
             const bool cursor = t->cursor_visible && x == t->cx && y == t->cy;
             cdk_screen_draw_cell(s, cv, &line[x], x, y, cursor);
         }
+    }
+
+    /* 未確定文字列は毎回いちばん上に描く。下の行が描き直されたときに
+     * 消えてしまわないよう、条件を付けずに重ねる。 */
+    if (s->preedit[0] != '\0') {
+        draw_preedit(s, cv, t);
     }
 
     s->last_cx = t->cx;
