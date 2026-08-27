@@ -1,0 +1,8 @@
+# 16MB フラッシュ。gen_esp32part.py --flash-size 16MB で検証済み。
+# 0xc10000 以降 約4MB が空き。将来 OTA が必要になったらここを ota_1 にする。
+# Name,     Type, SubType, Offset,  Size
+nvs,        data, nvs,     ,        24K
+phy_init,   data, phy,     ,        4K
+factory,    app,  factory, ,        4M
+skkdict,    data, 0x40,    ,        4M
+storage,    data, fat,     ,        4M

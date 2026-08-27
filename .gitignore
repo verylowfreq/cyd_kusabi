@@ -1,0 +1,28 @@
+# ESP-IDF
+cyberdeck_firmware/build/
+cyberdeck_firmware/managed_components/
+cyberdeck_firmware/sdkconfig
+cyberdeck_firmware/sdkconfig.old
+# dependencies.lock は BSP のバージョンを固定するのでコミットする
+
+# ホスト側ビルド
+cyberdeck_firmware/build-host/
+
+# 実行時に出る成果物
+cyberdeck_firmware/*.png
+cyberdeck_firmware/*.raw
+cyberdeck_firmware/*.log
+
+# 資格情報。ソースにも sdkconfig にも入れない (DESIGN.md 8.1)
+cyberdeck_firmware/secrets.h
+cyberdeck_firmware/sdkconfig.local
+
+# エディタ
+.vscode/
+__pycache__/
+
+# ルート直下のログ
+*.log
+
+# Claude Code のローカル設定
+.claude/
