@@ -59,7 +59,7 @@ ESP32-S3実機ではなくパソコン上で検証できるところは積極的
 ## テスト用WiFiネットワーク
 
 TEST_WIFI_SSID
-TEST_WIIF_PSK
+TEST_WIFI_PSK
 
 ## テスト用SSHサーバー
 
