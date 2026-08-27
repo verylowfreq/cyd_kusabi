@@ -29,7 +29,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 COUNTER_FILE = ROOT / ".dev-stats.json"
 
-# コマンド文字列 → カウンタ名。上から順に見て最初に当たったものだけ数える。
+# コマンド文字列 → カウンタ名。当たったものは**すべて**数える。
+# 1 回の呼び出しで build と flash を続けて実行することが多く、
+# 最初の 1 つだけ数えると取りこぼす。
 CLASSIFIERS: list[tuple[str, str]] = [
     # 書き込みはビルドより先に判定する（cdk.py flash は内部で esptool を呼ぶ）
     ("flash", r"cdk\.py\s+flash|idf\.py\s+.*\bflash\b|write_flash"),
@@ -82,12 +84,8 @@ def main() -> int:
         if not command:
             return 0
 
-        kind = None
-        for name, pattern in CLASSIFIERS:
-            if re.search(pattern, command):
-                kind = name
-                break
-        if kind is None:
+        kinds = [name for name, pattern in CLASSIFIERS if re.search(pattern, command)]
+        if not kinds:
             return 0
 
         # 出力は tool_response 側。まるごと文字列にして探す。
@@ -97,14 +95,15 @@ def main() -> int:
             out = ""
 
         data = load()
-        bump(data, kind)
+        for kind in kinds:
+            bump(data, kind)
 
-        if kind == "test_run":
+        if "test_run" in kinds:
             if TEST_PASS.search(out):
                 bump(data, "test_pass")
             elif TEST_FAIL.search(out):
                 bump(data, "test_fail")
-        elif kind in ("build_device", "build_host"):
+        if "build_device" in kinds or "build_host" in kinds:
             if BUILD_NG.search(out):
                 bump(data, "build_fail")
             elif BUILD_OK.search(out):

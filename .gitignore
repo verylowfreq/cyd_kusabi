@@ -15,6 +15,7 @@ cyberdeck_firmware/*.log
 
 # 資格情報。ソースにも sdkconfig にも入れない (DESIGN.md 8.1)
 cyberdeck_firmware/secrets.h
+cyberdeck_firmware/main/secrets.h
 cyberdeck_firmware/sdkconfig.local
 
 # エディタ

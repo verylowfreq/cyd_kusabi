@@ -23,7 +23,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
+
+#include "secrets.h"
 
 static const char *TAG = "cyberdeck";
 
@@ -72,11 +76,19 @@ static void send_screenshot(void)
     ESP_LOGI(TAG, "スクリーンショット送信 %ux%u", info.width, info.height);
 }
 
-/* 端末が返す応答 (DA / DSR)。SSH が繋がるまでは行き先が無いのでログに出す。 */
+/* 端末が返す応答 (DA / DSR)。
+ *
+ * これを送り返さないと、CSI 6n でカーソル位置を問い合わせて待つ CLI が
+ * 永久に固まる。しかも「端末のバグ」ではなく「CLI が謎のハング」に見えるので、
+ * キー入力を SSH へ繋ぐのと同時に必ず配線すること。 */
 static void on_term_reply(void *user, const uint8_t *data, size_t len)
 {
     (void)user;
-    ESP_LOGI(TAG, "端末からの応答 %u バイト", (unsigned)len);
+    if (cdk_ssh_is_open()) {
+        (void)cdk_ssh_write(data, len);
+    } else {
+        ESP_LOGI(TAG, "端末からの応答 %u バイト（送り先なし）", (unsigned)len);
+    }
 }
 
 static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t len)
@@ -93,8 +105,12 @@ static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t 
         break;
 
     case CDK_MSG_TEXT:
-        cdk_term_feed(&s_term, payload, len);
-        s_dirty = true;
+        if (cdk_ssh_is_open()) {
+            (void)cdk_ssh_write(payload, len);
+        } else {
+            cdk_term_feed(&s_term, payload, len);
+            s_dirty = true;
+        }
         break;
 
     case CDK_MSG_KEY:
@@ -105,9 +121,13 @@ static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t 
             uint8_t out[16];
             const size_t n = cdk_keys_encode(&k, s_term.app_cursor_keys, out, sizeof(out));
             if (n > 0) {
-                /* M1 はローカルエコー。M2 で SSH のチャネルへ送る。 */
-                cdk_term_feed(&s_term, out, n);
-                s_dirty = true;
+                if (cdk_ssh_is_open()) {
+                    (void)cdk_ssh_write(out, n);
+                } else {
+                    /* SSH 未接続のときはローカルエコー。M3 のシェルがここを引き取る。 */
+                    cdk_term_feed(&s_term, out, n);
+                    s_dirty = true;
+                }
             }
         }
         break;
@@ -116,6 +136,75 @@ static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t 
         ESP_LOGW(TAG, "未知のフレーム type=0x%02X len=%u", type, (unsigned)len);
         break;
     }
+}
+
+/* 端末に 1 行出して即座に画面へ反映する。起動中の進捗を実機で見せるため。 */
+static void term_printf(const char *fmt, ...)
+{
+    char buf[160];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return;
+    }
+    if (n >= (int)sizeof(buf)) {
+        n = (int)sizeof(buf) - 1; /* 切り詰められた */
+    }
+    cdk_term_feed(&s_term, buf, (size_t)n);
+    cdk_screen_draw(&s_screen, &s_canvas, &s_term, false);
+    (void)cdk_display_flush(&s_canvas);
+}
+
+static void connect_wifi(void)
+{
+    if (cdk_wifi_init() != ESP_OK) {
+        term_printf("\033[31mwifi  : 初期化に失敗\033[0m\r\n");
+        return;
+    }
+
+    term_printf("wifi  : %s に接続中...\r\n", CDK_WIFI_SSID);
+
+    const esp_err_t err = cdk_wifi_connect(CDK_WIFI_SSID, CDK_WIFI_PSK, 20000);
+    if (err != ESP_OK) {
+        term_printf("\033[31mwifi  : 失敗 %s reason=%d\033[0m\r\n",
+                    esp_err_to_name(err), cdk_wifi_last_disconnect_reason());
+        return;
+    }
+
+    char ip[20];
+    cdk_wifi_ip(ip, sizeof(ip));
+    term_printf("wifi  : \033[32m接続 %s\033[0m\r\n", ip);
+    term_printf("\033[33m$ \033[0m");
+}
+
+static void connect_ssh(void)
+{
+    if (!cdk_wifi_is_connected()) {
+        return;
+    }
+
+    term_printf("ssh   : %s@%s に接続中...\r\n", CDK_SSH_USER, CDK_SSH_HOST);
+
+    /* PTY のサイズは端末の実値。最終ハードの 80x26 を決め打ちしない。 */
+    const cdk_ssh_config_t cfg = {
+        .host = CDK_SSH_HOST,
+        .port = 22,
+        .user = CDK_SSH_USER,
+        .password = CDK_SSH_PASS,
+        .term = "xterm-256color",
+        .cols = s_term.cols,
+        .rows = s_term.rows,
+    };
+
+    const esp_err_t err = cdk_ssh_connect(&cfg);
+    if (err != ESP_OK) {
+        term_printf("\033[31mssh   : 接続失敗 %s\033[0m\r\n", esp_err_to_name(err));
+        return;
+    }
+    term_printf("ssh   : \033[32m接続 PTY %dx%d\033[0m\r\n", cfg.cols, cfg.rows);
+    ESP_LOGI(TAG, "SSH 接続完了。以降の画面はリモートの出力。");
 }
 
 static void draw_banner(void)
@@ -172,13 +261,34 @@ void app_main(void)
     ESP_ERROR_CHECK(cdk_link_init());
     (void)cdk_link_send(CDK_MSG_READY, CDK_VERSION, (uint32_t)strlen(CDK_VERSION));
 
+    connect_wifi();
+    connect_ssh();
+
     ESP_LOGI(TAG, "空きヒープ internal=%u spiram=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     ESP_LOGI(TAG, "%s %s %dx%d", CDK_READY_SENTINEL, CDK_VERSION, cols, rows);
 
     while (true) {
-        cdk_link_poll(20);
+        cdk_link_poll(5);
+
+        /* SSH の受信をそのまま端末へ流す。DESIGN.md §8.2 の通り
+         * 専用タスクは作らず、メインループが両方を見る。 */
+        if (cdk_ssh_is_open()) {
+            uint8_t rx[512];
+            for (int i = 0; i < 8; i++) { /* 1 周で汲みすぎない */
+                const int n = cdk_ssh_read(rx, sizeof(rx));
+                if (n > 0) {
+                    cdk_term_feed(&s_term, rx, (size_t)n);
+                    s_dirty = true;
+                    continue;
+                }
+                if (n < 0) {
+                    term_printf("\r\n\033[31mssh   : 切断されました\033[0m\r\n");
+                }
+                break;
+            }
+        }
 
         if (s_dirty) {
             /* 端末のダーティ行だけをキャンバスへ、
