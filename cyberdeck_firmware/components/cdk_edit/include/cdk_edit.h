@@ -86,6 +86,12 @@ void cdk_edit_set_size(cdk_edit_t *e, int cols, int rows);
  * エディタではなくシュレッダー。false を返し、読み込みは行わない。 */
 bool cdk_edit_load(cdk_edit_t *e, const char *path, const char *data, size_t len);
 
+/* すでに arena へ直接読み込んである場合。長さだけ受け取る。
+ *
+ * cdk_edit_load に arena 自身を渡すと memcpy の src と dst が重なる。
+ * いまは同じ番地なので動くが、規格上は未定義で、実装を変えた瞬間に壊れる。 */
+bool cdk_edit_adopt(cdk_edit_t *e, const char *path, size_t len);
+
 /* 新規（空）で開く。 */
 void cdk_edit_new(cdk_edit_t *e, const char *path);
 

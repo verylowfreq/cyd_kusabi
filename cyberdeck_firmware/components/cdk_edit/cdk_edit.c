@@ -156,20 +156,36 @@ static bool wrap_break(int col, int w, int cols)
  * 本文が上へ流れて消えるので、必ず切ってから出すこと。 */
 static void ed_clipped(cdk_edit_t *e, const char *s, int max_cols);
 
-/* row_start から始まる表示行の中で、桁 want に最も近い位置。 */
+/* row_start から始まる表示行の中で、桁 want に最も近い位置。
+ *
+ * **この行から出ない。** 折り返した行がちょうど右端まで埋まっていると、
+ * 「行の末尾」と「次の行の先頭」が同じオフセットになる。そこを返すと、
+ * 上へ動いたつもりが元の行に戻ってきて**カーソルが動かなくなる**。
+ * 行が埋まっているときは最後の文字の先頭に留める。 */
 static size_t offset_within(const cdk_edit_t *e, size_t row_start, int want)
 {
     size_t off = row_start;
     int    col = 0;
-    while (off < e->len) {
-        size_t   clen = 0;
-        uint32_t cp = char_at(e, off, &clen);
-        if (cp == (uint32_t)'\n') {
+    for (;;) {
+        if (off >= e->len) {
+            /* 本文の末尾。行が埋まっているならこの位置は次の表示行。 */
+            if (wrap_break(col, 1, e->cols) && off > row_start) {
+                off = prev_char(e, off);
+            }
             break;
+        }
+        size_t         clen = 0;
+        const uint32_t cp = char_at(e, off, &clen);
+        if (cp == (uint32_t)'\n') {
+            break; /* 改行の手前は行内の正しい位置 */
         }
         const int w = cdk_char_width(cp);
         if (wrap_break(col, w, e->cols)) {
-            break; /* ここから先は次の表示行 */
+            /* この文字は次の表示行。いまの行に留まる。 */
+            if (off > row_start) {
+                off = prev_char(e, off);
+            }
+            break;
         }
         if (col + w > want) {
             break;
@@ -420,11 +436,11 @@ void cdk_edit_new(cdk_edit_t *e, const char *path)
     snprintf(e->path, sizeof(e->path), "%s", (path != NULL) ? path : "");
 }
 
-bool cdk_edit_load(cdk_edit_t *e, const char *path, const char *data, size_t len)
+/* 入りきらないものは**読み込まない**。途中まで読んで保存すると、その時点で
+ * ファイルの後半が消える。切り詰めたものを黙って持つのはエディタではなく
+ * シュレッダー。 */
+static bool accept_len(cdk_edit_t *e, const char *path, size_t len)
 {
-    /* 入りきらないものは**読み込まない**。途中まで読んで保存すると、
-     * その時点でファイルの後半が消える。切り詰めたものを黙って持つのは
-     * エディタではなくシュレッダー。 */
     if (len > e->cap) {
         cdk_edit_new(e, path);
         e->readonly = true;
@@ -432,11 +448,42 @@ bool cdk_edit_load(cdk_edit_t *e, const char *path, const char *data, size_t len
                  (unsigned)len, (unsigned)e->cap);
         return false;
     }
+    return true;
+}
+
+/* 領域がほとんど残っていないなら、その場で言う。黙っていると
+ * 「開けるのに 1 文字も打てない」という理由の分からない状態になる。 */
+static void warn_if_full(cdk_edit_t *e)
+{
+    if (e->len + 1024 > e->cap) {
+        snprintf(e->msg, sizeof(e->msg), "残り %u バイト。ほとんど書けません",
+                 (unsigned)(e->cap - e->len));
+    }
+}
+
+bool cdk_edit_load(cdk_edit_t *e, const char *path, const char *data, size_t len)
+{
+    if (!accept_len(e, path, len)) {
+        return false;
+    }
     cdk_edit_new(e, path);
     if (len > 0 && data != NULL) {
         memcpy(e->buf, data, len);
     }
     e->len = len;
+    warn_if_full(e);
+    return true;
+}
+
+bool cdk_edit_adopt(cdk_edit_t *e, const char *path, size_t len)
+{
+    if (!accept_len(e, path, len)) {
+        return false;
+    }
+    /* cdk_edit_new は長さと状態を戻すだけで buf の中身は触らない。 */
+    cdk_edit_new(e, path);
+    e->len = len;
+    warn_if_full(e);
     return true;
 }
 
@@ -597,12 +644,11 @@ static void move_vert(cdk_edit_t *e, int delta)
             }
             rs = prev;
         } else {
+            /* next_row_start は次の行が無ければ rs をそのまま返す。
+             * 「本文の末尾に空の表示行があるか」もそこで決まるので、
+             * ここで改行の有無をもう一度見てはいけない（判断が 2 か所になる）。 */
             const size_t next = next_row_start(e, rs);
             if (next == rs) {
-                break;
-            }
-            /* 末尾に改行が無いのに最終行の先を指すのは行き過ぎ。 */
-            if (next >= e->len && !(e->len > 0 && e->buf[e->len - 1] == '\n')) {
                 break;
             }
             rs = next;

@@ -281,6 +281,61 @@ static void test_scroll(void)
     T_EQ_INT(cdk_edit_line_no(&E), 1);
 }
 
+static void test_wrap_scroll(void)
+{
+    /* 実機で走るのはこの形。1 つの論理行が画面より深く折り返す。
+     * ensure_visible が収束しないと「画面がずれる」ではなく**固まる**ので、
+     * 画素の話になる前に落としておきたい。 */
+    T_CASE("折り返しが画面より深い行をスクロールする");
+    setup(10, ROWS); /* 本文 5 行 */
+    cdk_edit_new(&E, "a.txt");
+    /* 全角 20 字 = 40 桁 = 4 行ぶん。さらに続けて 8 行ぶんにする */
+    char many[512];
+    many[0] = '\0';
+    for (int i = 0; i < 40; i++) {
+        strcat(many, "あ");
+    }
+    cdk_edit_insert(&E, many, strlen(many));
+    cdk_edit_draw(&E);
+
+    /* 40 字 x 2 桁 / 10 桁 = 16 行ぶん。最後の行が見えている */
+    T_EQ_INT(E.cur_row, ROWS - 2); /* 本文の最下行 */
+    T_CHECK(E.top > 0);
+
+    T_CASE("PgUp / PgDn が折り返しの中でも動く");
+    const size_t at_end = E.cursor;
+    key(CDK_K_PGUP, 0, 0);
+    T_CHECK(E.cursor < at_end);
+    const size_t after_pgup = E.cursor;
+    key(CDK_K_PGDN, 0, 0);
+    T_CHECK(E.cursor > after_pgup);
+
+    T_CASE("上へ押し続けると先頭の行に着く");
+    /* 桁は保たれるので本文の先頭 (0) ではなく「1 行目の同じ桁」。 */
+    for (int i = 0; i < 40; i++) {
+        key(CDK_K_UP, 0, 0);
+    }
+    T_EQ_INT((int)E.top, 0);
+    T_EQ_INT(E.cur_row, 0);
+    T_CHECK(E.cursor < 15); /* 1 行目 = 先頭 5 文字 = 15 バイト */
+
+    T_CASE("Home で本文の先頭へ");
+    key(CDK_K_HOME, 0, 0);
+    T_EQ_INT((int)E.cursor, 0);
+
+    T_CASE("下へ押し続けると最後の行に着く");
+    for (int i = 0; i < 40; i++) {
+        key(CDK_K_DOWN, 0, 0);
+    }
+    T_EQ_INT(E.cur_row, ROWS - 2);
+    T_CHECK(E.cursor >= 105); /* 最後の表示行 */
+
+    T_CASE("End と Down で本文の末尾に届く");
+    key(CDK_K_END, 0, 0);
+    key(CDK_K_DOWN, 0, 0);
+    T_EQ_INT((int)E.cursor, (int)at_end);
+}
+
 static void test_load_guard(void)
 {
     T_CASE("入りきらないファイルは読み込まない");
@@ -397,6 +452,7 @@ int main(void)
     test_wrap();
     test_wide();
     test_scroll();
+    test_wrap_scroll();
     test_load_guard();
     test_quit_save();
     return t_report("edit");

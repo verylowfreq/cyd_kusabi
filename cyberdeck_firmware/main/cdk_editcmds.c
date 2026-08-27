@@ -78,8 +78,9 @@ bool cdk_edit_file_load(cdk_edit_t *e, const char *path)
         e->readonly = true;
         return false;
     }
-    /* buf には直接読み込んだので、長さだけ合わせる。 */
-    (void)cdk_edit_load(e, path, e->buf, got);
+    /* buf へ直接読んだので、長さだけ合わせる。cdk_edit_load に e->buf を
+     * 渡すと memcpy の src と dst が重なる。 */
+    (void)cdk_edit_adopt(e, path, got);
     return true;
 }
 
