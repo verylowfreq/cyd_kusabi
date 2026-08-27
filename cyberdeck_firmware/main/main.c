@@ -503,19 +503,28 @@ void app_main(void)
         .skk_dict = app_skk_dict,
         .reboot = app_reboot,
     };
-    /* 2 つのコマンド表を繋いで渡す。help は登録された表をそのまま見る。 */
-    static cdk_shell_cmd_t all_cmds[32];
+    /* コマンド表を繋いで渡す。help は登録された表をそのまま見る。
+     * 溢れたぶんを黙って落とすと「コマンドが無い」としか見えないので、
+     * 静的表明で先に止める。 */
+#define ALL_CMDS_MAX 48
+    _Static_assert(ALL_CMDS_MAX >= 32, "コマンド表が小さすぎる");
+    static cdk_shell_cmd_t   all_cmds[ALL_CMDS_MAX];
+    const cdk_shell_cmd_t   *tables[] = {APP_COMMANDS, APP_FS_COMMANDS,
+                                         APP_SKK_COMMANDS};
+    const size_t             counts[] = {APP_COMMANDS_COUNT, APP_FS_COMMANDS_COUNT,
+                                         APP_SKK_COMMANDS_COUNT};
     size_t ncmds = 0;
-    for (size_t i = 0; i < APP_COMMANDS_COUNT && ncmds < 32; i++) {
-        all_cmds[ncmds++] = APP_COMMANDS[i];
-    }
-    for (size_t i = 0; i < APP_FS_COMMANDS_COUNT && ncmds < 32; i++) {
-        all_cmds[ncmds++] = APP_FS_COMMANDS[i];
-    }
-    for (size_t i = 0; i < APP_SKK_COMMANDS_COUNT && ncmds < 32; i++) {
-        all_cmds[ncmds++] = APP_SKK_COMMANDS[i];
+    for (size_t t = 0; t < sizeof(tables) / sizeof(tables[0]); t++) {
+        for (size_t i = 0; i < counts[t]; i++) {
+            if (ncmds >= ALL_CMDS_MAX) {
+                ESP_LOGE(TAG, "コマンド表が溢れました。ALL_CMDS_MAX を増やすこと");
+                break;
+            }
+            all_cmds[ncmds++] = tables[t][i];
+        }
     }
     cdk_shell_set_commands(&s_shell, all_cmds, ncmds, &s_ctx);
+    ESP_LOGI(TAG, "コマンド %u 個", (unsigned)ncmds);
 
     cdk_link_set_handler(on_frame, NULL);
     ESP_ERROR_CHECK(cdk_link_init());

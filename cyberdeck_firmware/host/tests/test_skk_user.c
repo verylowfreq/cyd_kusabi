@@ -124,6 +124,46 @@ static void test_persist(void)
     T_CHECK(cdk_skk_user_lookup(&U, "か11", false) != NULL); /* 残っている */
 }
 
+static void test_truncation(void)
+{
+    /* 実物の SKK-JISYO.L の「かえr」は注釈つきで 9 候補あり、
+     * つないだ長さは個人辞書の受け皿 (192 バイト) を超える。
+     *
+     * ここで**選んだ候補が落ちる**と、学習が効かないのは
+     * まさに候補の多い語＝いちばん学習してほしい語になる。
+     * 落ちるのは後ろ側でなければならない。 */
+    T_CASE("受け皿を超えても選んだ候補は先頭に残る");
+    setup();
+    cdk_skk_user_set_persist(&U, NULL, NULL);
+
+    static const char *const many[] = {
+        "帰", "返", "還", "孵", "反", "変", "代", "歸", "皈", "易", "換", "替",
+    };
+    const int n = (int)(sizeof(many) / sizeof(many[0]));
+
+    for (int i = 0; i < n; i++) {
+        cdk_skk_user_learn(&U, "かえr", true, many[i]);
+        const char *c = cdk_skk_user_lookup(&U, "かえr", true);
+        T_CHECK(c != NULL);
+        /* 直前に選んだものが必ず先頭 */
+        char head[64];
+        snprintf(head, sizeof(head), "/%s/", many[i]);
+        T_CHECK(strncmp(c, head, strlen(head)) == 0);
+        T_CHECK(strlen(c) < CDK_SKK_USER_CANDS_MAX);
+    }
+
+    T_CASE("受け皿より長い候補そのものは捨てる");
+    setup();
+    cdk_skk_user_set_persist(&U, NULL, NULL);
+    char huge[CDK_SKK_USER_CANDS_MAX + 32];
+    memset(huge, 'X', sizeof(huge) - 1);
+    huge[sizeof(huge) - 1] = '\0';
+    cdk_skk_user_learn(&U, "ながい", false, huge);
+    /* エントリはできるが候補は空。壊れた文字列を残さない。 */
+    const char *c = cdk_skk_user_lookup(&U, "ながい", false);
+    T_CHECK(c == NULL);
+}
+
 static void test_merge(void)
 {
     char out[512];
@@ -155,6 +195,7 @@ int main(void)
 {
     test_learn();
     test_persist();
+    test_truncation();
     test_merge();
     return t_report("skk_user");
 }
