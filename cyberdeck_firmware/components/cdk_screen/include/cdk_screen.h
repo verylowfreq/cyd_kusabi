@@ -1,0 +1,54 @@
+/* cdk_screen — 端末のセルグリッドを RGB565 キャンバスへ描く
+ *
+ * ESP-IDF に依存しない純 C。実機でもホストのテストでも同じコードが動く。
+ */
+#ifndef CDK_SCREEN_H
+#define CDK_SCREEN_H
+
+#include "cdk_canvas.h"
+#include "cdk_font.h"
+#include "cdk_term.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    const cdk_font_t *font;
+    int origin_x;
+    int origin_y;
+
+    uint16_t palette[256]; /* xterm 256 色を RGB565 に落としたもの */
+    uint16_t default_fg;
+    uint16_t default_bg;
+
+    /* SGR の太字を「明るい色」で表現する。
+     * 6x12 に太字のグリフを別に持つとフラッシュが倍になるうえ、
+     * 6px 幅では太らせても潰れて読めない。xterm の既定と同じ振る舞い。 */
+    bool bold_is_bright;
+
+    /* カーソルの前回位置。移動時にその行を描き直すため。 */
+    int last_cx;
+    int last_cy;
+    bool cursor_drawn;
+} cdk_screen_t;
+
+void cdk_screen_init(cdk_screen_t *s, const cdk_font_t *font);
+
+/* キャンバスに収まる桁数・行数。ステータス帯のぶんは呼び側で引くこと。 */
+int cdk_screen_cols(const cdk_screen_t *s, int canvas_w);
+int cdk_screen_rows(const cdk_screen_t *s, int canvas_h);
+
+/* ダーティ行だけを描き、端末側のダーティを消す。
+ * all を立てると全行を描く。 */
+void cdk_screen_draw(cdk_screen_t *s, cdk_canvas_t *cv, cdk_term_t *t, bool all);
+
+/* 1 セルを描く。テストと部分更新用。 */
+void cdk_screen_draw_cell(const cdk_screen_t *s, cdk_canvas_t *cv,
+                          const cdk_cell_t *cell, int col, int row, bool cursor);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* CDK_SCREEN_H */

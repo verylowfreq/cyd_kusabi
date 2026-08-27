@@ -78,30 +78,32 @@ cyberdeck_firmware/
 │   ├── CMakeLists.txt
 │   └── main.c                  # 起動・タスク構成のみ。ロジックを置かない
 ├── components/                 # ── 純 C コア（ホストでもビルドする）──
-│   ├── cdk_proto/              # ホストPC↔デバイスの制御フレーミング
-│   ├── cdk_text/               # UTF-8 / 東アジア文字幅
-│   ├── cdk_font/               # グリフテーブル参照 + ラスタライズ
-│   ├── cdk_canvas/             # RGB565 キャンバス、ダーティ行管理
-│   ├── cdk_term/               # VT パーサ + 画面バッファ
-│   ├── cdk_shell/              # コマンドラインパーサ + 組み込みコマンド
-│   ├── cdk_skk/                # SKK エンジン + 辞書リーダ
-│   └── cdk_edit/               # テキストエディタのバッファ/編集ロジック
+│   ├── cdk_proto/              # ホストPC↔デバイスの制御フレーミング       [M0]
+│   ├── cdk_text/               # UTF-8 / 東アジア文字幅                     [M1]
+│   ├── cdk_canvas/             # RGB565 キャンバス、ダーティ行管理          [M0]
+│   ├── cdk_font/               # フォントブロブ + shinonome12.cdkfont       [M1]
+│   ├── cdk_term/               # VT パーサ + 画面バッファ                   [M1]
+│   ├── cdk_keys/               # キーイベント → 端末が期待するバイト列      [M1]
+│   ├── cdk_screen/             # セルグリッド → キャンバス描画              [M1]
+│   ├── cdk_shell/              # コマンドラインパーサ + 組み込みコマンド    [M3]
+│   ├── cdk_skk/                # SKK エンジン + 辞書リーダ                  [M5]
+│   └── cdk_edit/               # テキストエディタのバッファ/編集ロジック    [M6]
 ├── components_port/            # ── ESP-IDF 依存の薄いポート層 ──
-│   ├── port_display/           # esp_lcd + BSP、キャンバスをパネルへ転送
-│   ├── port_input/             # シリアル注入 / (将来)USB HID → キーイベント
-│   ├── port_link/              # cdk_proto をシリアルに載せる
-│   ├── port_net/               # WiFi + SSH クライアント
-│   ├── port_storage/           # microSD (FATFS) + NVS
-│   └── port_periph/            # GPIO/I2C/ADC/UART の実操作
+│   ├── port_display/           # esp_lcd + BSP、キャンバスをパネルへ転送    [M0]
+│   ├── port_link/              # cdk_proto を USB-Serial-JTAG に載せる      [M0]
+│   ├── port_input/             # USB HID → キーイベント                     [M7]
+│   ├── port_net/               # WiFi + SSH クライアント                    [M2]
+│   ├── port_storage/           # microSD (FATFS) + NVS                      [M4]
+│   └── port_periph/            # GPIO/I2C/ADC/UART の実操作                 [M3]
 ├── host/                       # ── ホスト側ビルド ──
 │   ├── CMakeLists.txt          # components/ をそのまま取り込む
 │   ├── tests/                  # ユニットテスト（ctest）
-│   └── fixtures/               # 期待画面のスナップショット、PNG 期待値
+│   ├── tools/cdk_render.c      # 基準レンダラ（実機の検証にも使う）
+│   └── fixtures/vt/            # VT フィクスチャ。実機とホストが同じものを描く
 └── tools/                      # ── PC 側スクリプト（Python）──
     ├── cdk.py                  # デバイス制御 CLI（後述）
-    ├── bdf2c.py                # 東雲BDF → グリフテーブル C ソース
-    ├── skk_build.py            # SKK-JISYO.L → バイナリ辞書
-    └── raw2png.py              # スクリーンショット RAW → PNG
+    ├── mkfont.py               # 東雲BDF → フォントブロブ
+    └── skk_build.py            # SKK-JISYO.L → バイナリ辞書   [M5]
 ```
 
 ビルド入口は 2 つ:
@@ -187,6 +189,10 @@ CRC が合わなければ 1 バイト捨てて magic を探し直す。長さフ
 
 実装は `components/cdk_proto/`（ホストとデバイスで同一ソースを共有）。
 
+M0 で踏んだ罠: **`usb_serial_jtag_write_bytes()` は TX リングバッファより
+大きい書き込みができない。** 内部で丸ごとリングに積むので、リングを超える要求は
+何度呼んでも 0 を返し続ける。`port_link` では 512 バイトずつに分割して渡している。
+
 ---
 
 ## 4. 表示
@@ -202,15 +208,42 @@ idf.py add-dependency "espressif/m5stack_core_s3^2.0.0"
 ```
 
 最終ハードは BSP を持たないので、`port_display` は
-`bsp_*` を直接呼ばず `cdk_display_init()` / `cdk_display_blit()` の裏に隠す。
+`bsp_*` を直接呼ばず `cdk_display_init()` / `cdk_display_flush()` の裏に隠す。
+
+M0 で実測した BSP の性質:
+
+- `bsp_display_new()` が AXP2101 / AW9523 の電源投入、SPI3 初期化、
+  ILI9342C の reset/init/invert までやってくれる。LVGL は不要。
+- ただし `esp_lcd_panel_disp_on_off(panel, true)`、`bsp_display_brightness_init()`、
+  `bsp_display_backlight_on()` は自分で呼ぶ必要がある。
+- 回転・反転は不要（`swap_xy` / `mirror_x` / `mirror_y` すべて false）。
+- **`BSP_LCD_BIGENDIAN = 1`**。パネルはビッグエンディアンの RGB565 を期待する。
+  キャンバスはネイティブ（リトルエンディアン）なので転送時に `__builtin_bswap16` する。
+- **PSRAM は quad**。`CONFIG_SPIRAM_MODE_OCT=y` にすると
+  `PSRAM chip is not connected, or wrong PSRAM line mode` で起動時に abort する。
+- 起動時の `i2c.master: Please check pull-up resistances` は CoreS3 では正常。
 
 ### 4.2 キャンバスと転送
 
 - キャンバス: `RGB565`、PSRAM 上。480x320 で 300KB、320x240 で 150KB。
 - 描画はすべてキャンバスに対して行う。
-- **行単位のダーティフラグ**を持ち、変更のあった行帯だけ `esp_lcd_panel_draw_bitmap` で転送する。
+- **行単位のダーティ**を持ち、変更のあった行帯だけ `esp_lcd_panel_draw_bitmap` で転送する。
   端末は全画面書き換えが少ないので、これで SPI 帯域はまず問題にならない。
-- 転送は DMA、`esp_lcd` の `on_color_trans_done` で二重バッファ。
+
+> 注意: キャンバスのダーティは**行ごとのビットではなく min/max の 1 本の帯**。
+> カーソルが 1 行目から最終行へ飛ぶと、間の行が無傷でも全画面を転送する。
+> 320x240 で 150KB、40MHz SPI で約 30ms + バイトスワップ。
+> M1 では問題にならないが、SSH で対話していると効いてくる。
+> 実際に体感したら行ごと、あるいは連続する行の塊ごとの管理に変えること。
+> それまでは前倒しで最適化しない。
+- 転送は DMA。**バウンスバッファを 2 枚用意して交互に使う**。
+  `esp_lcd_panel_draw_bitmap` の色データは非同期だが、次の呼び出しが
+  CASET/RASET コマンドを送る前に in-flight の転送を必ず回収する
+  （`esp_lcd_panel_io_spi` の実装）。したがって交互に使えば、
+  これから書き込もうとしているバッファの転送は必ず完了している。
+  `on_color_trans_done` の登録は不要（BSP が作った io には登録できない）。
+- ILI9342C はビッグエンディアンの RGB565 を期待するので、
+  バウンスバッファへ写すときに `__builtin_bswap16` する。
 
 ### 4.3 テキストグリッド → ピクセル
 
@@ -224,37 +257,74 @@ idf.py add-dependency "espressif/m5stack_core_s3^2.0.0"
 ### 5.1 東雲 12px
 
 - ライセンス: **Public Domain**
-- 収録: JIS X 0201 + JIS X 0208 (+ ISO 8859-1)
-- 寸法: 半角 6x12 / 全角 12x12
-- 形式: BDF
+- 入手: `http://openlab.ring.gr.jp/efont/dist/shinonome/shinonome-0.9.11p1.tar.bz2`
+  （**https は繋がらない**。http で取ること）
+- 使うファイル:
 
-`tools/bdf2c.py` で BDF → C 配列に変換し、**フラッシュの rodata に焼き込む**（SD 不要）。
+| ファイル | 収録 | 寸法 | 割り当て |
+|---|---|---|---|
+| `shnm6x12a.bdf` | ISO 8859-1 | 6x12 | U+0020..U+00FF |
+| `shnm6x12r.bdf` | JIS X 0201 | 6x12 | U+FF61..U+FF9F（半角カナ） |
+| `shnmk12.bdf` | JIS X 0208 | 12x12 | euc_jp 経由で Unicode へ |
+
+`tools/mkfont.py` が BDF を読んでバイナリブロブ
+`components/cdk_font/shinonome12.cdkfont` を作る。
+**ブロブはリポジトリにコミットする**（BDF アーカイブは 4.6MB あるので入れない）。
+ブロブは `EMBED_FILES` でフラッシュに焼き込む。SD もファイルシステムも要らない。
+
+```
+python tools/mkfont.py <shinonome-0.9.11/bdf> -o components/cdk_font/shinonome12.cdkfont
+```
+
+実測 (2026-08-27):
 
 | データ | サイズ |
 |---|---|
-| 半角 6x12 × 約 256 字 (12 バイト/字) | 約 3 KB |
-| 全角 12x12 × 約 6,879 字 (24 バイト/字) | 約 165 KB |
-| Unicode → グリフ番号 索引 (u16 ソート配列 + 二分探索) | 約 14 KB |
-| **合計** | **約 185 KB** |
+| グリフ 7,269 字（漢字 6,868 / 罫線 128 / ブロック 32 / 記号 43） | — |
+| 索引 (u16 コードポイント + u32 エントリ) | 42.6 KB |
+| ビットマップ | 164 KB |
+| **合計** | **207 KB** |
 
-16MB フラッシュに対して無視できる。辞書と違って SD 依存にしない。
+ブロブ形式は `tools/mkfont.py` の docstring が正。
+`cdk_font_open()` が全セクションの範囲を検証してから開く。
 
-### 5.2 収録外文字の扱い（要注意）
+### 5.2 自前で描いたグリフ
 
-東雲は JIS X 0208 の範囲しか持たない。CLI が使う文字で足りないものがある。
+東雲に無い、または全角しか無くて使えないものを `mkfont.py` が生成する。
 
-- **罫線素片 (U+2500〜U+257F)**: JIS X 0208 にある分は対応表でマップ。
-  太線・二重線など JIS に無い字形は **自前で 12x12 グリフを追加**する（数十字なので手描きで足りる）。
-- **ブロック要素 (U+2580〜U+259F)**: プログラム生成で追加（塗り分けだけなので自動生成できる）。
-- **Powerline / Nerd Font 記号 (U+E0A0〜, U+F000〜)**: **非対応**。
-  → 代替: 端末側で近似 ASCII に置換するテーブルを持つ。
-  → もしくは SSH 先の設定でこれらを使わないプロンプトにしてもらう。
-- **絵文字**: 非対応。`〓`（げた）で表示し、桁数だけは全角 2 セルとして正しく数える。
+- **罫線素片 U+2500..U+257F（128 字）**
+  JIS X 0208 にも入っているが**全角**。端末は East Asian Width = Ambiguous に従って
+  **半角**として数えるので、全角グリフを当てると必ず桁がずれる。
+  上下左右の腕の太さ（無し / 細 / 太 / 二重）から 6x12 で組み立てる。
+  腕はセルの端まで届かせて、隣のセルと線が繋がるようにする。
+  破線は実線、角丸は普通の角で近似。
+- **ブロック要素 U+2580..U+259F（32 字）** — 塗り分けなので手続き的に生成。
+- **記号 43 字** — `SYMBOLS_SRC` に 6x12 の点図として直接書いてある。
+  `─ – — … • ← ↑ → ↓ ⇒ ≠ ≤ ≥ ■ □ ▲ ▼ ◆ ○ ● ★ ✓ ✗ π` など、
+  CLI が実際に使うもの。DEC 特殊グラフィクス (`ESC ( 0`) の写像先も全部ここで埋めている。
+- **notdef（げた）** — 半角/全角それぞれ。斜線ではなく枠にして空白と区別する。
+
+### 5.3 幅とグリフの不一致を許さない
+
+`cdk_font_glyph(font, cp, cells, &g)` は、見つかったグリフの幅が要求セル数と
+違えば **notdef を返す**。グリフがあっても使わせない。
+桁がずれるくらいなら げた を出す方がましだから。
+
+この規則の帰結として、Ambiguous 幅でグリフが全角しか無い文字
+（ギリシャ文字、キリル文字、丸数字など）は げた になる。
+CLI 用途では実害が小さいと判断して M1 では放置する。
+将来 `set ambiwidth double` を入れるなら、`cdk_char_width` と
+グリフ選択の両方を同時に切り替えること。
+
+### 5.4 まだ出せないもの
+
+- **Powerline / Nerd Font 記号 (U+E0A0〜, U+F000〜)**: 非対応。
+  → SSH 先のプロンプト設定でこれらを使わないようにしてもらう。
+- **絵文字**: 非対応。げたで表示し、幅だけは全角 2 セルとして正しく数える。
+- **ハングル・キリル拡張など**: グリフ無し。幅は正しい。
 
 「表示できないこと」より「桁がずれること」の方が端末としては致命的なので、
 **幅計算は必ず Unicode East Asian Width に従い、グリフの有無と切り離す**。
-
----
 
 ## 6. ターミナルエミュレータ
 
@@ -287,8 +357,12 @@ ABOUT.md のリストをそのまま実装可能な粒度に展開したもの�
 
 ### 6.3 端末種別
 
-`TERM=xterm-256color` を名乗る。上記に無いシーケンスが来ても壊れないことを、
-ホスト側テストで実際の CLI 出力キャプチャを流して確認する。
+`TERM=xterm-256color` を名乗る。`CSI c` (DA) には `ESC[?62;22c`（VT220 相当）を返す。
+上記に無いシーケンスが来ても壊れないことを、ホスト側テストで確認する
+（`t->stat_unknown` に捨てた数が溜まるので、実機でも異常を検知できる）。
+
+**太字の扱い**: SGR 1 は字を太らせず、前景色を明るい方（パレット 0-7 → 8-15）に振る。
+6px 幅で字を太らせても潰れて読めないため。xterm の既定と同じ振る舞い。
 
 ### 6.4 ホスト側テスト
 
@@ -298,6 +372,18 @@ host/fixtures/vt/NNN_name.txt   # 期待するグリッド（テキスト + 属�
 ```
 
 `vttest` の出力や実際の `claude` / `codex` CLI のログを流し込んで回帰させる。
+
+同じフィクスチャを実機の検証にも使う（M1 で実装済み）。
+
+```
+cdk_render vt <fixture.vt> <width> <height> <out.raw>
+python tools/cdk.py shot out.png --verify-vt host/fixtures/vt/banner.vt
+```
+
+実機が描いた画面と、ホストで同じ純 C コードが描いた基準画像をバイト単位で比較する。
+起動バナー `host/fixtures/vt/banner.vt` は**ファームにも `EMBED_FILES` で焼き込んで**
+いるので、実機とホストが文字通り同じバイト列を食べている。
+これで「実機だけで壊れている」ことを機械的に切り分けられる。
 
 ---
 
@@ -513,21 +599,47 @@ ABOUT.md 「実装困難・不能な箇所についての指摘と代替案」�
 
 各マイルストーンの完了条件は「エージェントがコマンド一発で検証できること」。
 
-### M0 — 基盤（最優先）
+### M0 — 基盤 ✅ 完了 (2026-08-27)
 
-- ESP-IDF プロジェクト骨格、`components/` と `components_port/` の分離
-- `host/` の CMake + ctest が通る
-- CoreS3 BSP で LCD 点灯、PSRAM キャンバス確保、描画
-- `cdk_proto` フレーミング + `tools/cdk.py` の `flash` / `log` / `shot` / `type`
-- **完了条件**: `python tools/cdk.py shot out.png` で実機の画面が PNG で取れる
+- [x] ESP-IDF プロジェクト骨格、`components/` と `components_port/` の分離
+- [x] `host/` の CMake + ctest（`test_proto` / `test_canvas` / `no_idf_in_core`）
+- [x] CoreS3 BSP で LCD 点灯、PSRAM キャンバス確保、テストパターン描画
+- [x] `cdk_proto` フレーミング（再同期つき）+ `port_link`
+- [x] `tools/cdk.py` の `build` / `flash` / `log` / `boot` / `ping` / `shot` / `type` / `key`
+- [x] **完了条件**: `cdk.py shot out.png --verify` で実機の画面を取得し、
+      ホスト側で同じ純 C コードが描いた基準画像と 153,600 バイト完全一致することを確認
 
-### M1 — ターミナル
+実測値: アプリ 279KB / 内部ヒープ空き 311KB / PSRAM 空き 8.2MB。
 
-- `cdk_text`（UTF-8 + 幅）、`cdk_font`（東雲 12px 焼き込み）、`cdk_canvas`
-- `cdk_term` VT パーサ（§6.2 の全部）
-- 画面へのレンダリング、ダーティ行転送
-- ホスト側 VT 回帰テスト一式
-- **完了条件**: `tools/cdk.py type` で流したエスケープ列が期待通り描画され、ホストテストが緑
+**未検証**: `selftest` はキャンバスと転送経路だけを見ており、`cdk_display_flush()`
+（バイトスワップ、ダーティ帯の座標、バウンスバッファの交互使用）は通っていない。
+画面が真っ黒でも selftest は緑になる。実機の目視確認が要る:
+
+- 右上マーカーが**緑**、左下が**青** → 向きは正しい
+- 上下または左右が入れ替わっている → mirror / rotation
+- 中段のグレー勾配に色が付いて見える → バイトスワップが逆
+
+### M1 — ターミナル ✅ 完了 (2026-08-27)
+
+- [x] `cdk_text` — UTF-8 ストリームデコーダ + East Asian Width
+- [x] `cdk_font` — 東雲 12px ブロブ (207KB) をフラッシュに焼き込み
+- [x] `tools/mkfont.py` — BDF → ブロブ。罫線 128 字 / ブロック 32 字 / 記号 43 字を自前生成
+- [x] `cdk_term` — VT パーサ（§6.2 の全部）+ 画面バッファ + 代替画面
+- [x] `cdk_keys` — キーイベント → 端末バイト列
+- [x] `cdk_screen` — セルグリッド → キャンバス。256色 / truecolor / 属性
+- [x] `cdk_render vt` — ホストとデバイスで共有する基準レンダラ
+- [x] ホスト側テスト 8 スイート（`test_proto` `test_text` `test_canvas` `test_font`
+      `test_term` `test_keys` `test_screen` `no_idf_in_core`）
+- [x] **完了条件**: `cdk.py selftest` が
+      `shot --verify-vt host/fixtures/vt/banner.vt` まで通り、
+      実機の画面がホストの基準画像と 153,600 バイト完全一致
+
+実測値: アプリ 503KB（うちフォント 207KB）/ 内部ヒープ空き 310KB / PSRAM 空き 8.19MB /
+端末 53桁 x 20行 = 34KB。
+
+実機で確認できたこと: 単線・二重線・太線の枠が正しく接続する、
+ブロック要素の塗り分け、矢印・✓✗●○◆・≤≥≠π、日本語（かな漢字・半角カナ）、
+16色/明色/truecolor、太字（明色化）・下線・反転・淡色。
 
 ### M2 — WiFi + SSH（不確実性が最大。早く潰す）
 
