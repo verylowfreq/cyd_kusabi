@@ -8,8 +8,8 @@ import cv2
 
 
 DEFAULT_CAMERA_INDEX = 3
-FRAME_WIDTH = 1280
-FRAME_HEIGHT = 720
+FRAME_WIDTH = 1920
+FRAME_HEIGHT = 1080
 
 USAGE = """usage: capture-camera.py [出力パス] [カメラindex]
 
@@ -46,7 +46,7 @@ def main() -> int:
 
         if (actual_width, actual_height) != (FRAME_WIDTH, FRAME_HEIGHT):
             print(
-                f"警告: 1280x720を要求しましたが、"
+                f"警告: {FRAME_WIDTH}x{FRAME_HEIGHT}を要求しましたが、"
                 f"実際の解像度は{actual_width}x{actual_height}です。",
                 file=sys.stderr,
             )

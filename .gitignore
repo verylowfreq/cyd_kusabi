@@ -24,8 +24,9 @@ __pycache__/
 # ルート直下のログ
 *.log
 
-# Claude Code のローカル設定
-.claude/
+# Claude Code のローカル設定。settings.json（統計フック）だけは追跡する。
+.claude/*
+!.claude/settings.json
 
 # 秘密情報
 .env
@@ -33,3 +34,6 @@ __pycache__/
 # カメラ撮影
 camera-*.jpg
 cyberdeck_firmware/*.jpg
+
+# 統計フックが貯める生カウンタ（DEV_STATS.md に集計する）
+.dev-stats.json

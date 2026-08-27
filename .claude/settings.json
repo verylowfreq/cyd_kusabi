@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:/DATA-0/Documents/20260827_cyberdeck_1/dev-stats-hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:/DATA-0/Documents/20260827_cyberdeck_1/dev-stats-hook.py\" fail",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
