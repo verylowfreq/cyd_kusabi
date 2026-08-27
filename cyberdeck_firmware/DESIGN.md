@@ -93,6 +93,7 @@ cyberdeck_firmware/
 │   ├── port_link/              # cdk_proto を USB-Serial-JTAG に載せる      [M0]
 │   ├── port_input/             # USB HID → キーイベント                     [M7]
 │   ├── port_net/               # WiFi + SSH クライアント                    [M2]
+│   ├── port_board/             # 基板ごとのピンと能力（cdk_board.h）       [M6]
 │   ├── port_skk/               # 辞書をフラッシュ/SD から読む口             [M5]
 │   ├── port_spibus/            # SPI3 の所有権と G35 の役割切り替え         [M4]
 │   ├── port_storage/           # microSD (FATFS)                            [M4]
@@ -106,7 +107,8 @@ cyberdeck_firmware/
 └── tools/                      # ── PC 側スクリプト（Python）──
     ├── cdk.py                  # デバイス制御 CLI（後述）
     ├── mkfont.py               # 東雲BDF → フォントブロブ
-    └── skk_build.py            # SKK-JISYO.L → バイナリ辞書   [M5]
+    ├── skk_build.py            # SKK-JISYO.L → バイナリ辞書   [M5]
+    └── check_board_pins.py     # ピン定義と HARDWARE_DESIGN.md の突き合わせ
 ```
 
 ビルド入口は 2 つ:
@@ -1147,7 +1149,57 @@ CoreS3 は空きピンが少ない。LCD / SD / 内蔵 I2C / USB / ログ UART /
 
 - USB HID ホスト、UART コンソール、480x320 パネル、電源
 
-画面が 53x20 から 80x26 に変わるので、桁数・行数を持っている側を洗うこと。
+基板の仕様と検証は **HARDWARE_DESIGN.md**（2026-08-28 に検証済み、指摘 12 件は決着）。
+
+#### 基板の切り分け ✅ できている (2026-08-28)
+
+試作機（CoreS3）と最終ハード（v1）で **PSRAM のモードが違う**。
+CoreS3 は quad、N16R8 は octal で、間違えると起動時に abort する。
+コンソールの出口も違う（CoreS3 は UART1 → FT232、v1 は UART0）。
+
+```
+python tools/cdk.py build              # 既定 = cores3
+python tools/cdk.py build --board v1
+```
+
+| どこ | 何を持つ |
+|---|---|
+| `sdkconfig.defaults` | 基板に依らない設定だけ |
+| `sdkconfig.defaults.cores3` / `.v1` | PSRAM のモード、コンソールの出口、`CONFIG_CDK_BOARD_*` |
+| `components_port/port_board/include/cdk_board.h` | ピン番号と「その基板にその機能があるか」 |
+
+**基板を変えるときは `sdkconfig` を作り直す。** ESP-IDF は既存の
+`sdkconfig` の値を defaults より優先するので、消さないと前の基板の
+PSRAM 設定が残る。`cdk.py build --board` が `.cdk_board` を見て自動で消す。
+
+機能の有無は `CDK_BOARD_HAS_*` で **0/1 を必ず定義する**。`#ifdef` にすると、
+綴りを間違えたときに黙って「機能なし」に倒れる。
+
+ポート層で基板ごとに分かれているのは 3 か所だけ:
+
+| ファイル | 違い |
+|---|---|
+| `port_spibus` | CoreS3 だけ G35 の向きを切り替える。v1 は別バスなのでロックだけ |
+| `port_display` | CoreS3 は BSP。**v1 はパネルの型番が未定なので明示的にエラーを返す** |
+| `port_storage` | CoreS3 は BSP。v1 は SPI3 に sdspi を自分で立てる |
+
+**ピン番号は 2 か所（HARDWARE_DESIGN.md と `cdk_board.h`）にある。**
+片方だけ直すと、基板は正しいのにファームが別のピンを叩くという、実機でしか
+出ないうえに原因の分かりにくい壊れ方をする。`tools/check_board_pins.py` が
+ctest（`board_pins`）で両方を突き合わせている。
+
+#### まず決めないと進めないこと
+
+**液晶コントローラの型番。** 480x320 の SPI は ILI9488 か ST7796 が多いが、
+初期化列も色の受け方も違う。ILI9488 は SPI 接続だと 18bit しか受けない品種が
+あり、その場合キャンバスの RGB565 を転送時に 3 バイトへ展開することになる
+（転送量が 1.5 倍。300KB/フレームが 450KB）。当てずっぽうで初期化列を書くと
+「何も出ない」のか「初期化が違う」のか切り分けられなくなるので、
+`port_display` の v1 側はいま明示的にエラーを返している。
+
+#### 画面が 53x20 から 80x26 に変わる
+
+桁数・行数を持っている側を洗うこと。
 
 - [ ] `cdk_edit_set_size()` は `edit` を開くときにしか呼んでいない。
       画面の大きさが動く可能性が出たら、変わったときに呼び直す口が要る。

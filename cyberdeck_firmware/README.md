@@ -63,6 +63,8 @@ idf.py build
 ```powershell
 $py = "C:\DATA-0\Espressif\python_env\idf5.5_py3.14_env\Scripts\python.exe"
 
+& $py tools\cdk.py build                    # ビルド（既定 = 試作機 CoreS3）
+& $py tools\cdk.py build --board v1         # 最終ハード向け
 & $py tools\cdk.py flash                    # ビルド済みバイナリを書き込む
 & $py tools\cdk.py boot                     # リセットして #CDK-READY まで待つ
 & $py tools\cdk.py log --timeout 5          # ログを 5 秒ぶん読む

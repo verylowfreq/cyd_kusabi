@@ -1,0 +1,19 @@
+# 最終ハード: cyberdeck v1 (ESP32-S3-WROOM-1-N16R8 / 480x320)
+#
+# ピン割り当ての根拠は HARDWARE_DESIGN.md。値そのものは cdk_board.h にある。
+# sdkconfig.defaults と一緒に指定すること。
+
+CONFIG_CDK_BOARD_V1=y
+
+# --- PSRAM ---
+# **N16R8 の PSRAM は octal。** quad にすると容量を認識できない。
+CONFIG_SPIRAM_MODE_OCT=y
+
+# --- コンソール（HARDWARE_DESIGN.md F-1） ---
+# USB は OTG ホストに使うので USB-Serial-JTAG が無い。
+# ログと書き込みは UART0 (G43=TX / G44=RX)、モジュール既定のピン。
+# 制御チャネルは UART1 (G15/G16) で別に持つので、ここには流さない。
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

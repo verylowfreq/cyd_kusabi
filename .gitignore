@@ -3,6 +3,8 @@ cyberdeck_firmware/build/
 cyberdeck_firmware/managed_components/
 cyberdeck_firmware/sdkconfig
 cyberdeck_firmware/sdkconfig.old
+# 最後にビルドした基板。cdk.py build --board が使う（作業状態であって仕様ではない）
+cyberdeck_firmware/.cdk_board
 # dependencies.lock は BSP のバージョンを固定するのでコミットする
 
 # ホスト側ビルド

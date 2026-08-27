@@ -1,8 +1,11 @@
 #include "cdk_display.h"
 
-#include "bsp/display.h"
+#include "cdk_board.h"
 #include "cdk_spibus.h"
+#if CDK_BOARD_HAS_BSP
+#include "bsp/display.h"
 #include "bsp/m5stack_core_s3.h"
+#endif
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
@@ -17,19 +20,22 @@ static const char *TAG = "cdk_disp";
 #define BOUNCE_ROWS 16
 
 static esp_lcd_panel_handle_t    s_panel;
+#if CDK_BOARD_HAS_BSP
+/* BSP が返すハンドル。転送には使わないが、受け取る先が要る。 */
 static esp_lcd_panel_io_handle_t s_io;
+#endif
 static uint16_t                 *s_bounce[2];
 static size_t                    s_bounce_px;
 static int                       s_bounce_idx;
 static int                       s_width;
 static int                       s_height;
 
-esp_err_t cdk_display_init(cdk_display_info_t *info)
-{
-    if (s_panel != NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
+/* パネルを起こすところだけが基板ごとに違う。転送 (cdk_display_flush) は
+ * 大きさを実行時に持っているので、そのまま共通で動く。 */
+#if CDK_BOARD_HAS_BSP
 
+static esp_err_t board_panel_init(void)
+{
     s_width = BSP_LCD_H_RES;
     s_height = BSP_LCD_V_RES;
     s_bounce_px = (size_t)s_width * BOUNCE_ROWS;
@@ -38,16 +44,57 @@ esp_err_t cdk_display_init(cdk_display_info_t *info)
         .max_transfer_sz = (int)(s_bounce_px * sizeof(uint16_t)),
     };
 
-    /* LCD の DC と SD の MISO が同じピンなので、役割の切り替えを
-     * cdk_spibus に任せる。詳しくは cdk_spibus.h。 */
-    ESP_RETURN_ON_ERROR(cdk_spibus_init(), TAG, "cdk_spibus_init");
-
     /* BSP が AXP2101 / AW9523 の電源投入、SPI、ILI9342C の初期化までやる。
      * ここを自前で書くと LCD が無言で真っ黒になる。 */
     ESP_RETURN_ON_ERROR(bsp_display_new(&cfg, &s_panel, &s_io), TAG, "bsp_display_new");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "disp_on");
     ESP_RETURN_ON_ERROR(bsp_display_brightness_init(), TAG, "brightness_init");
     ESP_RETURN_ON_ERROR(bsp_display_backlight_on(), TAG, "backlight_on");
+    return ESP_OK;
+}
+
+static esp_err_t board_set_brightness(int percent)
+{
+    return bsp_display_brightness_set(percent);
+}
+
+#else /* v1 */
+
+static esp_err_t board_panel_init(void)
+{
+    /* ピンは cdk_board.h に入っているが、**パネルのコントローラが未定**。
+     * 480x320 の SPI は ILI9488 か ST7796 が多く、初期化列も色の受け方も違う。
+     * ILI9488 は SPI だと 18bit しか受けない品種があり、その場合は
+     * キャンバスの RGB565 を転送時に 3 バイトへ展開することになる
+     * （転送量が 1.5 倍）。当てずっぽうで初期化列を書くと、
+     * 「何も出ない」のか「初期化が違う」のか切り分けられなくなる。 */
+    ESP_LOGE(TAG,
+             "パネルのコントローラが未定なので初期化できません "
+             "(HARDWARE_DESIGN.md「まだ決まっていないこと」)");
+    ESP_LOGE(TAG, "ピンは決まっている: CS=%d MOSI=%d SCLK=%d DC=%d RST=%d BL=%d",
+             CDK_BOARD_LCD_CS, CDK_BOARD_LCD_MOSI, CDK_BOARD_LCD_SCLK,
+             CDK_BOARD_LCD_DC, CDK_BOARD_LCD_RST, CDK_BOARD_LCD_BL);
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+static esp_err_t board_set_brightness(int percent)
+{
+    (void)percent;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+#endif
+
+esp_err_t cdk_display_init(cdk_display_info_t *info)
+{
+    if (s_panel != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* 共有バスの基板では、ここで役割の切り替え役を用意しておく。
+     * 別バスの基板でもロックは持つので、呼び出し側は同じ。 */
+    ESP_RETURN_ON_ERROR(cdk_spibus_init(), TAG, "cdk_spibus_init");
+    ESP_RETURN_ON_ERROR(board_panel_init(), TAG, "board_panel_init");
 
     /* バウンスバッファは内部 RAM の DMA 可能領域に置く。
      * 2 枚あるのは esp_lcd の転送が非同期だから（下の flush のコメント参照）。 */
@@ -72,7 +119,7 @@ esp_err_t cdk_display_init(cdk_display_info_t *info)
 
 esp_err_t cdk_display_set_brightness(int percent)
 {
-    return bsp_display_brightness_set(percent);
+    return board_set_brightness(percent);
 }
 
 esp_err_t cdk_display_flush(cdk_canvas_t *canvas)

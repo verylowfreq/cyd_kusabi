@@ -1,0 +1,21 @@
+# 試作機: M5Stack CoreS3 (ESP32-S3R8 / 16MB flash / 8MB PSRAM / 320x240)
+#
+# sdkconfig.defaults と一緒に指定すること。単体では足りない。
+
+CONFIG_CDK_BOARD_CORES3=y
+
+# --- PSRAM ---
+# **CoreS3 の PSRAM は quad。** octal にすると
+# "PSRAM chip is not connected, or wrong PSRAM line mode" で起動時に abort する。
+CONFIG_SPIRAM_MODE_QUAD=y
+
+# --- コンソール（DESIGN.md §3.4） ---
+# ログは UART1 → CoreS3 PORT.C (G17=TX / G18=RX) → FT232 (COM75)。
+# USB-Serial-JTAG は cdk_proto の制御チャネル専用にするので、
+# ログを一切流さないように SECONDARY_NONE にする。
+CONFIG_ESP_CONSOLE_UART_CUSTOM=y
+CONFIG_ESP_CONSOLE_UART_NUM=1
+CONFIG_ESP_CONSOLE_UART_TX_GPIO=17
+CONFIG_ESP_CONSOLE_UART_RX_GPIO=18
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

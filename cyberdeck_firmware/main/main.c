@@ -14,6 +14,7 @@
  */
 #include "app.h"
 
+#include "cdk_board.h"
 #include "cdk_canvas.h"
 #include "cdk_cfg.h"
 #include "cdk_display.h"
@@ -659,7 +660,8 @@ void app_main(void)
     ESP_LOGI(TAG, "空きヒープ internal=%u spiram=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    ESP_LOGI(TAG, "%s %s %dx%d", CDK_READY_SENTINEL, CDK_VERSION, cols, rows);
+    ESP_LOGI(TAG, "%s %s [%s] %dx%d", CDK_READY_SENTINEL, CDK_VERSION,
+             cdk_board_name(), cols, rows);
 
     term_printf("\r\nhelp でコマンド一覧\r\n");
     enter_shell();

@@ -112,6 +112,12 @@ add_test(NAME no_idf_in_core
 # コミット済みの fixture では通り続けて実物の辞書だけが壊れる。
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_FOUND)
+    # ピン番号は HARDWARE_DESIGN.md と cdk_board.h の 2 か所にある。
+    # 片方だけ直すと、基板は正しいのにファームが別のピンを叩く。
+    add_test(NAME board_pins
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_board_pins.py)
+
     add_test(NAME skk_fixture_reproducible
              COMMAND ${CMAKE_COMMAND}
                      -DPY=${Python3_EXECUTABLE}

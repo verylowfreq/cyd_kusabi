@@ -622,15 +622,47 @@ def cmd_dict(args) -> int:
     return subprocess.run(cmd).returncode
 
 
+BOARDS = ("cores3", "v1")
+
+
 def cmd_build(args) -> int:
-    """idf.py build を非対話で回す。"""
+    """idf.py build を非対話で回す。
+
+    基板ごとに sdkconfig.defaults.<board> を重ねる。PSRAM のモードが
+    違うので、混ぜると起動時に abort する（CoreS3 に octal を指定すると必ず）。
+    基板を変えたら sdkconfig を作り直さないと前の設定が残るため、
+    --board を明示したときは消してから作る。
+    """
     export = IDF_PATH / "export.bat"
     if not export.exists():
         print(f"[cdk] {export} がありません", file=sys.stderr)
         return 1
+
+    board = getattr(args, "board", None) or "cores3"
+    if board not in BOARDS:
+        print(f"[cdk] 知らない基板: {board}（{' / '.join(BOARDS)}）", file=sys.stderr)
+        return 1
+    per_board = PROJECT_DIR / f"sdkconfig.defaults.{board}"
+    if not per_board.exists():
+        print(f"[cdk] {per_board} がありません", file=sys.stderr)
+        return 1
+
+    # sdkconfig は「既存の値が defaults に勝つ」ので、基板を変えるときは
+    # 消さないと前の基板の PSRAM 設定が residue として残る。
+    sdkconfig = PROJECT_DIR / "sdkconfig"
+    if getattr(args, "board", None) and sdkconfig.exists():
+        marker = PROJECT_DIR / ".cdk_board"
+        prev = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+        if prev != board:
+            print(f"[cdk] 基板が {prev or '不明'} → {board} に変わったので sdkconfig を作り直します")
+            sdkconfig.unlink()
+    (PROJECT_DIR / ".cdk_board").write_text(board, encoding="utf-8")
+
+    defaults = f"sdkconfig.defaults;sdkconfig.defaults.{board}"
+    print(f"[cdk] 基板: {board}")
     # cmd.exe に list で渡すとクォートが壊れる。文字列 + shell=True で渡し、
     # 先頭を 'call' にして export.bat から確実に戻ってくるようにする。
-    cmd = f'call "{export}" >NUL && idf.py build'
+    cmd = f'call "{export}" >NUL && idf.py -DSDKCONFIG_DEFAULTS="{defaults}" build'
     r = subprocess.run(cmd, cwd=PROJECT_DIR, shell=True)
     return r.returncode
 
@@ -769,6 +801,8 @@ def main() -> int:
     p.set_defaults(func=cmd_key)
 
     p = sub.add_parser("build", help="idf.py build")
+    p.add_argument("--board", choices=BOARDS, default=None,
+                   help="基板 (既定 cores3)。変えると sdkconfig を作り直す")
     p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("flash", help="ビルド済みバイナリを書き込む")

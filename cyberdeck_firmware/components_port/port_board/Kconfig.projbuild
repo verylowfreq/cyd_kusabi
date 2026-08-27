@@ -1,0 +1,26 @@
+menu "Cyberdeck"
+
+choice CDK_BOARD
+    prompt "基板"
+    default CDK_BOARD_CORES3
+    help
+      どの基板向けにビルドするか。ピン割り当てだけでなく PSRAM のモード
+      （CoreS3 は quad / v1 は octal）やコンソールの出口も変わるので、
+      間違えると起動時に abort するか、画面が真っ黒のままになる。
+
+config CDK_BOARD_CORES3
+    bool "M5Stack CoreS3 (試作機)"
+    help
+      320x240 / quad PSRAM / LCD と SD が SPI3 を共有し、LCD の DC と
+      SD の MISO が同じ G35。制御チャネルは USB-Serial-JTAG。
+
+config CDK_BOARD_V1
+    bool "cyberdeck v1 (最終ハード)"
+    help
+      480x320 / octal PSRAM / LCD は SPI2 の IO_MUX、SD は SPI3 で別バス。
+      USB は OTG ホストに使うので、制御チャネルは UART1。
+      HARDWARE_DESIGN.md のピン表がそのまま cdk_board.h に入っている。
+
+endchoice
+
+endmenu
