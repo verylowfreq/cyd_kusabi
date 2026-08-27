@@ -1,0 +1,3 @@
+dependencies:
+  espressif/m5stack_core_s3:
+    version: "^2.0.0"

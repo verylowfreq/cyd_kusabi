@@ -3,7 +3,8 @@
  * M0: ビルド基盤 / ホスト側テスト / LCD 表示 / スクショ転送 / 有限時間のログ取得
  * M1: VT パーサ + 東雲 12px フォント + テキストコンソール
  * M2: WiFi + libssh2 による PTY 付き SSH
- * M3: 行編集つきシェル + GPIO / ADC / I2C  ← いまここ
+ * M3: 行編集つきシェル + GPIO / ADC / I2C
+ * M4: microSD (FATFS)  ← いまここ
  *
  * キーの行き先は 1 か所（route_key）だけで決める。
  * 条件分岐をあちこちに散らすと「このキーは誰が受け取るのか」が
@@ -21,6 +22,7 @@
 #include "cdk_proto.h"
 #include "cdk_screen.h"
 #include "cdk_shell.h"
+#include "cdk_storage.h"
 #include "cdk_term.h"
 
 #include "esp_heap_caps.h"
@@ -39,7 +41,7 @@ static const char *TAG = "cyberdeck";
 
 /* tools/cdk.py がこの行を見て「起動完了」と判断する。 */
 #define CDK_READY_SENTINEL "#CDK-READY"
-#define CDK_VERSION        "cyberdeck M3"
+#define CDK_VERSION        "cyberdeck M4"
 
 /* フォントはフラッシュに焼き込む。SD もファイルシステムも要らない。 */
 extern const uint8_t font_start[] asm("_binary_shinonome12_cdkfont_start");
@@ -412,11 +414,31 @@ void app_main(void)
         .ssh_is_open = app_ssh_is_open,
         .reboot = app_reboot,
     };
-    cdk_shell_set_commands(&s_shell, APP_COMMANDS, APP_COMMANDS_COUNT, &s_ctx);
+    /* 2 つのコマンド表を繋いで渡す。help は登録された表をそのまま見る。 */
+    static cdk_shell_cmd_t all_cmds[32];
+    size_t ncmds = 0;
+    for (size_t i = 0; i < APP_COMMANDS_COUNT && ncmds < 32; i++) {
+        all_cmds[ncmds++] = APP_COMMANDS[i];
+    }
+    for (size_t i = 0; i < APP_FS_COMMANDS_COUNT && ncmds < 32; i++) {
+        all_cmds[ncmds++] = APP_FS_COMMANDS[i];
+    }
+    cdk_shell_set_commands(&s_shell, all_cmds, ncmds, &s_ctx);
 
     cdk_link_set_handler(on_frame, NULL);
     ESP_ERROR_CHECK(cdk_link_init());
     (void)cdk_link_send(CDK_MSG_READY, CDK_VERSION, (uint32_t)strlen(CDK_VERSION));
+
+    /* microSD。挿さっていなければ黙って諦める（後から `sd mount` で入れられる）。 */
+    if (cdk_sd_mount() == ESP_OK) {
+        char     name[24] = {0};
+        uint64_t cap = 0;
+        cdk_sd_info(name, sizeof(name), &cap, NULL);
+        term_printf("sd    : \033[32m%s %lluMB\033[0m\r\n", name,
+                    (unsigned long long)(cap / (1024ULL * 1024ULL)));
+    } else {
+        term_printf("\033[33msd    : 見つかりません\033[0m\r\n");
+    }
 
     /* 起動時に WiFi まで繋いでおく。SSH は `ssh` コマンドで入る。
      * 自動で SSH に入るとシェルに触れないまま起動が終わってしまう。 */

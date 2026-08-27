@@ -9,6 +9,8 @@
  */
 #include "cdk_net.h"
 
+#include "cdk_knownhosts.h"
+
 #include "esp_log.h"
 #include "libssh2.h"
 
@@ -27,6 +29,7 @@ static LIBSSH2_CHANNEL   *s_channel;
 static bool               s_open;
 static bool               s_lib_inited;
 static char               s_fingerprint[64];
+static cdk_hostkey_result_t s_hostkey_result = CDK_HOSTKEY_UNVERIFIED;
 
 static void log_fingerprint(void)
 {
@@ -41,10 +44,7 @@ static void log_fingerprint(void)
         n += snprintf(s_fingerprint + n, sizeof(s_fingerprint) - (size_t)n, "%02X%s",
                       (unsigned char)fp[i], (i < 19) ? ":" : "");
     }
-    /* known_hosts による検証は M4（SD が使えるようになってから）。
-     * それまでは指紋をログに出して、人間が目視できるようにしておく。 */
-    ESP_LOGW(TAG, "ホスト鍵 SHA1: %s （検証は未実装。M4 で known_hosts を入れる）",
-             s_fingerprint);
+    ESP_LOGI(TAG, "ホスト鍵 SHA1: %s", s_fingerprint);
 }
 
 /* keyboard-interactive のコールバック。
@@ -168,6 +168,17 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
     }
     log_fingerprint();
 
+    /* known_hosts と突き合わせる。食い違ったら必ず断る。 */
+    const cdk_hostkey_result_t hk =
+        cdk_knownhosts_check(s_session, cfg->host, cfg->port ? cfg->port : 22);
+    s_hostkey_result = hk;
+    if (hk == CDK_HOSTKEY_MISMATCH) {
+        ESP_LOGE(TAG, "ホスト鍵が %s の記録と一致しません。接続を中止します",
+                 cdk_knownhosts_path());
+        cdk_ssh_close();
+        return ESP_ERR_INVALID_STATE;
+    }
+
     /* サーバーが受け付ける方式を見てから選ぶ。
      * ここを出しておかないと「パスワードが違う」のか
      * 「その方式を出していない」のか切り分けられない。 */
@@ -243,6 +254,11 @@ bool cdk_ssh_is_open(void)
 const char *cdk_ssh_fingerprint(void)
 {
     return s_fingerprint;
+}
+
+int cdk_ssh_hostkey_status(void)
+{
+    return (int)s_hostkey_result;
 }
 
 int cdk_ssh_read(uint8_t *buf, size_t cap)

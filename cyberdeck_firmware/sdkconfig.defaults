@@ -45,3 +45,14 @@ CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
 
 # --- スタック ---
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# --- FATFS / microSD（DESIGN.md §10） ---
+# 既定は CONFIG_FATFS_LFN_NONE で、8.3 の短縮名しか扱えない。
+# known_hosts は 11 文字なので fopen が FR_INVALID_NAME で失敗する。
+# libssh2 からは rc=-16 (LIBSSH2_ERROR_FILE) としか見えず原因が分かりにくい。
+# 症状の目印: ls にカードの実ファイルが LICENC~1.BRO のように出る。
+# LFN は HEAP に置く。STACK だと 255*2 バイトが各タスクのスタックに乗る。
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+# ファイル名の API は UTF-8。端末も cdk_term も UTF-8 なので変換点を作らない。
+CONFIG_FATFS_API_ENCODING_UTF_8=y

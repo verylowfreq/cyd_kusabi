@@ -1,6 +1,7 @@
 #include "cdk_display.h"
 
 #include "bsp/display.h"
+#include "cdk_spibus.h"
 #include "bsp/m5stack_core_s3.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -36,6 +37,10 @@ esp_err_t cdk_display_init(cdk_display_info_t *info)
     const bsp_display_config_t cfg = {
         .max_transfer_sz = (int)(s_bounce_px * sizeof(uint16_t)),
     };
+
+    /* LCD の DC と SD の MISO が同じピンなので、役割の切り替えを
+     * cdk_spibus に任せる。詳しくは cdk_spibus.h。 */
+    ESP_RETURN_ON_ERROR(cdk_spibus_init(), TAG, "cdk_spibus_init");
 
     /* BSP が AXP2101 / AW9523 の電源投入、SPI、ILI9342C の初期化までやる。
      * ここを自前で書くと LCD が無言で真っ黒になる。 */
@@ -86,6 +91,10 @@ esp_err_t cdk_display_flush(cdk_canvas_t *canvas)
         return ESP_OK;
     }
 
+    /* 転送のあいだ G35 を DC（出力）にしておく。SD が入力にしたままだと
+     * DC が動かず、コマンドとデータの区別がつかなくなって画面が壊れる。 */
+    cdk_spibus_acquire(CDK_SPIBUS_LCD);
+
     for (int y = y0; y < y1; y += BOUNCE_ROWS) {
         int rows = y1 - y;
         if (rows > BOUNCE_ROWS) {
@@ -107,11 +116,16 @@ esp_err_t cdk_display_flush(cdk_canvas_t *canvas)
             dst[i] = __builtin_bswap16(src[i]);
         }
 
-        ESP_RETURN_ON_ERROR(
-            esp_lcd_panel_draw_bitmap(s_panel, 0, y, s_width, y + rows, dst), TAG,
-            "draw_bitmap");
+        const esp_err_t err =
+            esp_lcd_panel_draw_bitmap(s_panel, 0, y, s_width, y + rows, dst);
+        if (err != ESP_OK) {
+            cdk_spibus_release();
+            ESP_LOGE(TAG, "draw_bitmap に失敗 %s", esp_err_to_name(err));
+            return err;
+        }
     }
 
+    cdk_spibus_release();
     cdk_canvas_dirty_clear(canvas);
     return ESP_OK;
 }

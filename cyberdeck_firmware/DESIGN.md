@@ -93,7 +93,9 @@ cyberdeck_firmware/
 │   ├── port_link/              # cdk_proto を USB-Serial-JTAG に載せる      [M0]
 │   ├── port_input/             # USB HID → キーイベント                     [M7]
 │   ├── port_net/               # WiFi + SSH クライアント                    [M2]
-│   ├── port_storage/           # microSD (FATFS) + NVS                      [M4]
+│   ├── port_spibus/            # SPI3 の所有権と G35 の役割切り替え         [M4]
+│   ├── port_storage/           # microSD (FATFS)                            [M4]
+│   ├── port_cfg/               # NVS（設定・認証情報）                      [M3]
 │   └── port_periph/            # GPIO/I2C/ADC/UART の実操作                 [M3]
 ├── host/                       # ── ホスト側ビルド ──
 │   ├── CMakeLists.txt          # components/ をそのまま取り込む
@@ -484,7 +486,43 @@ GPLv3 の許容は不要になった（libssh2 は BSD-3-Clause）。
 - `libssh2_channel_request_pty_size_ex()` で画面サイズ変更を通知
 - ノンブロッキング + `select` でメインループに組み込む
 
-**ホスト鍵検証**: `known_hosts` を SD に置く（M4）。それまでは指紋をログに出して先へ進む。
+**ホスト鍵検証** (`port_knownhosts.c`、M4 で実装): `/sdcard/ssh/known_hosts` と
+突き合わせる。方針は TOFU。
+
+| 判定 | 動作 |
+|---|---|
+| 一致 | 繋ぐ |
+| 未登録 | 指紋を出して覚え、繋ぐ (TOFU) |
+| **不一致** | **`ESP_ERR_INVALID_STATE` で断る** |
+| SD 無し / 書けない | 覚えられないが繋ぐ |
+
+不一致を警告だけにして繋いだら、検証している意味がなくなる。
+逆に SD が無いだけで繋げないのは端末として使えないので、そこは緩める。
+
+`hostkey forget` で記録を消せる。これが無いと、正当な再鍵をしたサーバーに
+二度と繋げなくなって詰む。
+
+**この「断る」枝は外から普通に叩けない。** 一度も走らせないまま正しいと
+信じることになるので、`CDK_KNOWNHOSTS_FAULT_INJECT` を用意した。
+
+```
+idf.py build -DCDK_FAULT_KNOWNHOSTS=1     # 照合用の鍵の末尾ビットを反転する
+```
+
+**壊すのは照合に使う鍵だけで、記録には本物を書く。** 両方壊すと、
+記録も同じように壊れて一致してしまい「細工したのに繋がる」ことになる
+（実際に一度これで引っかかった）。照合だけ壊せば 1 つのビルドで
+
+1. 1 回目 — 未登録なので本物を記録して繋がる
+2. 2 回目以降 — 記録（本物）と照合用（壊れている）が食い違うので必ず断る
+
+まで通せる。既定は無効で、有効にすると CMake が警告を出す。
+CMake のキャッシュ変数なので、**確認が済んだら `-DCDK_FAULT_KNOWNHOSTS=0`
+で戻して、実際に繋がるところまで見ること。**
+
+libssh2 の鍵種別は曲線ごとに別のビットに直すこと。
+ECDSA をまとめて `LIBSSH2_KNOWNHOST_KEY_ECDSA_256` にすると、
+nistp384 の鍵を `ecdsa-sha2-nistp256` という嘘の名前で書き出してしまう。
 
 #### タスク構成
 
@@ -561,6 +599,25 @@ reboot / info / free
 
 `uart monitor` は端末を占有するので Ctrl-] で抜ける。
 
+### 実装済み (M4 時点)
+
+```
+help  echo  clear  history  free  info  reboot
+wifi [connect]           WiFi の状態 / 再接続
+ssh [close]              設定済みのホストへ接続（NVS または secrets.h）
+hostkey [forget]         SSH ホスト鍵の検証状態 / known_hosts の削除
+set <key> [value]        NVS の設定。パスワードは伏せる
+sd [mount|unmount]       microSD の状態と容量
+ls [dir]  cat <f>  rm <f>  mkdir <dir>
+sdtest                   SD に書いて読み戻す
+gpio mode|set|get <pin>  予約ピンは名前つきで弾く
+i2c scan|read|write
+adc read <ch>
+```
+
+未実装: `cp` `mv` `df` `edit` `pwm` `skk` `uart` `wifi scan` `shot` の SD 保存。
+`ssh <user>@<host>` の引数指定もまだで、いまは設定に入っている 1 か所へ繋ぐだけ。
+
 ---
 
 ## 11. ストレージ
@@ -577,6 +634,27 @@ CoreS3 の microSD は LCD と SPI バスを共有する。同一バスの排他
 （`esp_lcd` の SPI と `sdspi` を同じホストに載せ、トランザクション単位で共存させる）。
 **LCD 転送中に SD アクセスが割り込むと画面が壊れる**ので、
 キャンバス転送タスクと SD アクセスをミューテックスで直列化する。
+
+さらに CoreS3 では **LCD の DC と SD の MISO が同じ G35**。排他だけでは足りず、
+所有者が変わるたびにピンの向きを切り替える必要がある（`port_spibus`）。
+LCD 側は出力、SD 側は入力。再帰ミューテックスにしてあるのは、
+`cdk_sd_lock()` を持ったまま呼ぶ関数の中でもう一度取ることがあるため。
+
+### FATFS の長いファイル名
+
+**`CONFIG_FATFS_LFN_HEAP=y` が要る。** ESP-IDF の既定は `FATFS_LFN_NONE` で、
+8.3 の短縮名しか扱えない。`known_hosts` は 11 文字なので `fopen` が
+`FR_INVALID_NAME` で失敗する。
+
+これは原因に辿りつきにくい。libssh2 からは `rc=-16 (LIBSSH2_ERROR_FILE)` としか
+見えず、「SD が壊れている」「ディレクトリが無い」と誤診しやすい。
+**見分け方は `ls`**: カードの実ファイルが `LICENC~1.BRO` のように
+チルダ付きで出ていれば LFN が無効。
+
+`FATFS_LFN_STACK` ではなく HEAP にしているのは、
+255 文字 x 2 バイトが各タスクのスタックに乗るのを避けるため。
+`CONFIG_FATFS_API_ENCODING_UTF_8=y` も入れて、端末・`cdk_term` と
+ファイル名の文字コードを揃えてある（変換点を作らない）。
 
 パーティション（16MB）。`gen_esp32part.py --flash-size 16MB` で検証済み:
 
@@ -608,7 +686,7 @@ ABOUT.md 「実装困難・不能な箇所についての指摘と代替案」�
 | 4 | **Nerd Font / Powerline / 絵文字** | 今どきの CLI プロンプトが化ける | 近似 ASCII 置換テーブル + 幅計算だけは正しく行う。表示は諦める |
 | 5 | **SSH ライブラリが ESP-IDF で素直に組めない可能性** | プロジェクトの根幹 | wolfSSH を第一候補（GPLv3 は許容と判断済み）、libssh2 を第二候補。M2 冒頭でスパイクして早期に判定 |
 | 6 | **SKK-JISYO.L が実機で扱えない** | 変換不能 | PC 上でバイナリ索引化し、SD から二分探索。RAM 一定 |
-| 7 | **LCD と microSD の SPI バス共有 (CoreS3)** | 画面破壊・SD エラー | 転送を排他制御。最終ハードでは SD を SDMMC で別バスにする設計を推奨 |
+| 7 | **LCD と microSD の SPI バス共有 (CoreS3)** | 画面破壊・SD エラー | ✅ M4 で解決。`port_spibus` が再帰ミューテックスで直列化し、**G35 の向きも切り替える**（LCD DC は出力 / SD MISO は入力）。最終ハードでは SD を SDMMC で別バスにする設計を推奨 |
 | 8 | **SPI 液晶のリードバック不可** | スクリーンショットが取れない | PSRAM キャンバスを真実とし、描画を必ず経由させてダンプ |
 | 9 | **フル画面書き換え時の SPI 帯域** | スクロールが遅い | 行ダーティ管理 + ハードウェア縦スクロール（`DECSTBM` を `esp_lcd` の vertical scroll に対応付ける最適化を M1 後に検討） |
 | 10 | **truecolor → RGB565** | 色が丸まる | 仕様として許容。SGR は受理し最近傍に丸める |
@@ -684,7 +762,7 @@ COLS=53 LINES=20 TERM=xterm-256color
 
 まだ残っているもの:
 
-- [ ] `known_hosts` によるホスト鍵検証（M4。SD が要る）。いまは指紋をログに出すだけ
+- [x] `known_hosts` によるホスト鍵検証 → M4 で実装・実機確認済み
 - [ ] 認証情報を NVS へ（いまは `secrets.h` にビルド時に焼いている）
 - [ ] 公開鍵認証
 - [ ] 画面サイズ変更時の `cdk_ssh_resize()` 呼び出し（API はある、呼ぶ側が未実装）
@@ -758,10 +836,41 @@ CoreS3 は空きピンが少ない。LCD / SD / 内蔵 I2C / USB / ログ UART /
 
 キー配線に影響するので、実装より先にここを決めること。
 
-### M4 — ストレージ
+### M4 — ストレージ ✅ 完了 (2026-08-27)
 
-- microSD マウント、SPI バス排他
-- ファイル系コマンド、`shot` の SD 保存
+- [x] `port_spibus` — G35（LCD DC / SD MISO）の役割切り替え。再帰ミューテックス
+- [x] `port_storage` — マウント / 情報 / 使用量、`cdk_sd_lock()` / `cdk_sd_unlock()`
+- [x] `main/cdk_fscmds.c` — `sd` `ls` `cat` `rm` `mkdir` `sdtest`
+- [x] `port_knownhosts` — `/sdcard/ssh/known_hosts` による TOFU 検証、`hostkey forget`
+- [x] **完了条件**: SD にホスト鍵を記録して再接続で一致し、
+      鍵が違うときは接続を断る。SD アクセス中も画面が壊れない
+
+実測値: アプリ 1,268KB / 内部ヒープ空き 164KB / PSRAM 空き 8.09MB /
+カード SL16G 15,193MB。
+
+実機で確認できたこと:
+
+| 経路 | 確認方法 | 結果 |
+|---|---|---|
+| 未登録 → 記録 | 1 回目の `ssh` | `初めて見たので覚えた (TOFU)` |
+| 一致 | 2 回目の `ssh` | `記録と一致`（緑） |
+| **不一致 → 拒否** | `-DCDK_FAULT_KNOWNHOSTS=1` ビルド | `接続失敗 ESP_ERR_INVALID_STATE` |
+| 拒否のあとの再試行 | 同じ起動のまま `ssh` を 7 回 | 毎回同じように断る。固まらない。内部ヒープの増減 0 バイト |
+| 記録の削除 | `hostkey forget` | 次の接続が TOFU に戻る。2 回目は「もともとありません」 |
+| 読み書き | `sdtest` | 101 バイトを書いて読み戻し一致 |
+| **パネルの無事** | SD アクセス直後に `cdk.py cam` | **カメラで確認**。`shot` はキャンバスのダンプなので転送の破壊は写らない |
+
+`ls` は SD 上の日本語ファイル名も出る（LFN + UTF-8）。
+
+踏んだ罠:
+
+- **FATFS の LFN（§11）。** `known_hosts` が開けず `rc=-16` だけが出る。
+- **ECDSA の鍵種別ビットを 1 つに丸めていた**（§8.2）。
+  nistp256 では偶然正しく、384/521 で嘘の名前を書く。実機では踏まなかった。
+- `sdkconfig` を消して `sdkconfig.defaults` から作り直すときは、
+  PSRAM・コンソール UART・パーティションが復活しているか起動ログで確認すること。
+- SSH セッションに入ったままローカルのコマンドを打つと、
+  そのままリモートへ飛ぶ。検証の前には必ず `exit` を送る。
 
 ### M5 — SKK
 

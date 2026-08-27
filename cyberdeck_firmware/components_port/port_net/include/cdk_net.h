@@ -52,6 +52,9 @@ bool cdk_ssh_is_open(void);
 /* 直近に接続したホストの鍵指紋 (SHA1)。未接続なら空文字列。 */
 const char *cdk_ssh_fingerprint(void);
 
+/* known_hosts の判定結果 (cdk_hostkey_result_t)。 */
+int cdk_ssh_hostkey_status(void);
+
 /* 受信。0 = いま来ていない。負 = エラーまたは切断。 */
 int cdk_ssh_read(uint8_t *buf, size_t cap);
 

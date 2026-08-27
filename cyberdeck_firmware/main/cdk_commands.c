@@ -6,6 +6,7 @@
 #include "app.h"
 
 #include "cdk_cfg.h"
+#include "cdk_knownhosts.h"
 #include "cdk_net.h"
 #include "cdk_periph.h"
 
@@ -49,10 +50,12 @@ static int cmd_help(int argc, char **argv, void *user)
     (void)argv;
     cdk_shell_t *sh = ctx_of(user)->sh;
 
+    /* シェルに登録されている表をそのまま見る。
+     * コマンド表を増やしてもここを直さなくて済む。 */
     cdk_shell_write(sh, "\033[1m使えるコマンド\033[0m\r\n");
-    for (size_t i = 0; i < APP_COMMANDS_COUNT; i++) {
-        cdk_shell_printf(sh, "  \033[36m%-8s\033[0m %s\r\n", APP_COMMANDS[i].name,
-                         APP_COMMANDS[i].usage);
+    for (size_t i = 0; i < sh->ncmds; i++) {
+        cdk_shell_printf(sh, "  \033[36m%-7s\033[0m %s\r\n", sh->cmds[i].name,
+                         sh->cmds[i].usage);
     }
     return 0;
 }
@@ -215,6 +218,51 @@ static int cmd_ssh(int argc, char **argv, void *user)
     return 0;
 }
 
+/* ホスト鍵の状態。TOFU で覚えた直後は指紋を確認できるようにしておく。 */
+static int cmd_hostkey(int argc, char **argv, void *user)
+{
+    cdk_shell_t *sh = ctx_of(user)->sh;
+
+    if (argc >= 2 && strcmp(argv[1], "forget") == 0) {
+        switch (cdk_knownhosts_forget()) {
+        case CDK_KNOWNHOSTS_FORGET_OK:
+            cdk_shell_printf(sh, "%s を消しました。次の接続は TOFU になります\r\n",
+                             cdk_knownhosts_path());
+            return 0;
+        case CDK_KNOWNHOSTS_FORGET_ABSENT:
+            cdk_shell_printf(sh, "%s はもともとありません\r\n",
+                             cdk_knownhosts_path());
+            return 0;
+        case CDK_KNOWNHOSTS_FORGET_NO_SD:
+            cdk_shell_write(sh, "\033[31mSD がマウントされていません\033[0m\r\n");
+            return 1;
+        default:
+            cdk_shell_printf(sh, "\033[31m%s を消せません\033[0m\r\n",
+                             cdk_knownhosts_path());
+            return 1;
+        }
+    }
+    if (argc >= 2) {
+        cdk_shell_write(sh, "使い方: hostkey [forget]\r\n");
+        return 1;
+    }
+
+    static const char *const NAMES[] = {
+        "\033[32m記録と一致\033[0m",
+        "\033[33m初めて見たので覚えた (TOFU)\033[0m",
+        "\033[31m記録と不一致\033[0m",
+        "\033[33m検証できず (SD 無し等)\033[0m",
+        "\033[31mエラー\033[0m",
+    };
+    const int st = cdk_ssh_hostkey_status();
+    const char *fp = cdk_ssh_fingerprint();
+
+    cdk_shell_printf(sh, "指紋    : %s\r\n", (fp[0] != '\0') ? fp : "(未接続)");
+    cdk_shell_printf(sh, "検証    : %s\r\n", (st >= 0 && st < 5) ? NAMES[st] : "?");
+    cdk_shell_printf(sh, "記録先  : %s\r\n", cdk_knownhosts_path());
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* 周辺                                                                */
 /* ------------------------------------------------------------------ */
@@ -344,6 +392,7 @@ const cdk_shell_cmd_t APP_COMMANDS[] = {
     {"gpio",    "GPIO の mode / set / get",               cmd_gpio},
     {"adc",     "ADC1 を読む (adc read <ch>)",            cmd_adc},
     {"i2c",     "I2C を走査 (i2c scan <sda> <scl>)",      cmd_i2c},
+    {"hostkey", "SSH ホスト鍵の検証状態 (hostkey forget)", cmd_hostkey},
     {"reboot",  "再起動",                                 cmd_reboot},
 };
 

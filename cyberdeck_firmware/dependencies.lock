@@ -140,6 +140,6 @@ dependencies:
     version: 9.5.0
 direct_dependencies:
 - espressif/m5stack_core_s3
-manifest_hash: a0f5b419a6ec842b2aaa468e0ce6325ca1a194661e486bfdc204e2161cf8d959
+manifest_hash: cc9784820b1ec6596fabb95f3459773d42a0ae1be5fe3874f18ff2279859e56e
 target: esp32s3
 version: 2.0.0

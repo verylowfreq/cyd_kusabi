@@ -25,5 +25,9 @@ typedef struct {
     void (*reboot)(void);
 } app_ctx_t;
 
+/* コマンド表。main.c が 2 つを繋いでシェルに渡す。 */
 extern const cdk_shell_cmd_t APP_COMMANDS[];
 extern const size_t          APP_COMMANDS_COUNT;
+
+extern const cdk_shell_cmd_t APP_FS_COMMANDS[];
+extern const size_t          APP_FS_COMMANDS_COUNT;

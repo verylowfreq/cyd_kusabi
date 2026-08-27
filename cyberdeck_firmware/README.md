@@ -3,14 +3,15 @@
 ESP32-S3 サイバーデックのファームウェア。設計は [DESIGN.md](DESIGN.md)、
 プロジェクト全体の背景は [../ABOUT.md](../ABOUT.md)。
 
-現在の到達点: **M3 完了**
+現在の到達点: **M4 完了**
 
 - M0: ビルド基盤 / ホスト側テスト / LCD 表示 / スクリーンショット転送 / 有限時間のログ取得
 - M1: VT パーサ / 東雲 12px フォント / テキストコンソール（試作機で 53桁 x 20行）
 - M2: WiFi + libssh2 による **PTY 付き SSH**。実機で `top` が動く
 - M3: 行編集つきシェル + GPIO / ADC / I2C。認証情報を NVS へ
+- M4: microSD（SPI バス共有の解決）+ ファイル系コマンド + `known_hosts` によるホスト鍵検証
 
-次は M4（microSD）。残件は DESIGN.md §13 を参照。
+次は M5（SKK 日本語入力）。残件は DESIGN.md §13 を参照。
 
 ---
 
@@ -96,8 +97,10 @@ components_port/   ESP-IDF 依存の薄いポート層
   port_display/      BSP + esp_lcd。キャンバスをパネルへ転送
   port_link/         USB-Serial-JTAG の制御チャネル
   port_cfg/          NVS に置く設定（認証情報）
-  port_net/          WiFi + SSH クライアント
+  port_net/          WiFi + SSH クライアント + known_hosts 検証
   port_periph/       GPIO / ADC / I2C
+  port_spibus/       G35 を LCD DC と SD MISO で切り替える
+  port_storage/      microSD (FATFS/SDSPI)
   libssh2/           ベンダリングした libssh2 1.11.1
 main/              起動とタスク構成だけ
 host/              ホスト側 CMake / ctest / 基準レンダラ / VT フィクスチャ
@@ -135,7 +138,12 @@ python tools/mkfont.py shinonome-0.9.11/bdf -o components/cdk_font/shinonome12.c
 - **ILI9342C はビッグエンディアンの RGB565 を期待する。**
   キャンバスはネイティブ（リトルエンディアン）なので転送時に入れ替える。
 - **LCD と microSD が SPI3 を共有している**（MOSI 37 / MISO 35 / SCK 36）。
-  さらに LCD の DC が MISO と同じ G35。M4 で排他制御が要る。
+  さらに LCD の DC が MISO と同じ G35。排他だけでは足りず、
+  所有者が変わるたびにピンの向きを変える（`port_spibus`）。
+- **FATFS の既定は長いファイル名が無効**（`CONFIG_FATFS_LFN_NONE`）。
+  8.3 を超える名前は `fopen` が失敗する。`known_hosts` が開けず、
+  libssh2 からは `rc=-16` としか見えなかった。
+  見分け方は `ls`: 実ファイルが `LICENC~1.BRO` のように出ていれば LFN が無効。
 - ブート時の `i2c.master: Please check pull-up resistances` は CoreS3 では正常。
 - **フォントのビット並びは「バイトの MSB が左端」**。BDF は幅ぴったりのビット列で
   持っているので、ブロブに書くときに左詰めし直す必要がある。
