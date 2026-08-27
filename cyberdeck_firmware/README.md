@@ -3,7 +3,7 @@
 ESP32-S3 サイバーデックのファームウェア。設計は [DESIGN.md](DESIGN.md)、
 プロジェクト全体の背景は [../ABOUT.md](../ABOUT.md)。
 
-現在の到達点: **M5 完了**
+現在の到達点: **M6 完了**
 
 - M0: ビルド基盤 / ホスト側テスト / LCD 表示 / スクリーンショット転送 / 有限時間のログ取得
 - M1: VT パーサ / 東雲 12px フォント / テキストコンソール（試作機で 53桁 x 20行）
@@ -11,8 +11,9 @@ ESP32-S3 サイバーデックのファームウェア。設計は [DESIGN.md](D
 - M3: 行編集つきシェル + GPIO / ADC / I2C。認証情報を NVS へ
 - M4: microSD（SPI バス共有の解決）+ ファイル系コマンド + `known_hosts` によるホスト鍵検証
 - M5: **SKK 日本語入力**。SKK-JISYO.L 全体（17.5 万語）をフラッシュに載せ、学習も残す
+- M6: **テキストエディタ**。`edit <file>` で SD 上の文章を日本語入力つきで書く
 
-次は M6（エディタ）。残件は DESIGN.md §13 を参照。
+次は M7（最終ハード移行）。残件は DESIGN.md §13 を参照。
 
 ---
 
@@ -95,6 +96,7 @@ components/        ESP-IDF に依存しない純 C コア。ホストでもビ�
   cdk_screen/        セルグリッド → キャンバス描画
   cdk_shell/         行編集・履歴・補完・コマンド実行
   cdk_skk/           SKK 日本語入力（ローマ字かな・辞書・学習）
+  cdk_edit/          テキストエディタ（折り返し・移動・編集）
 components_port/   ESP-IDF 依存の薄いポート層
   port_display/      BSP + esp_lcd。キャンバスをパネルへ転送
   port_link/         USB-Serial-JTAG の制御チャネル

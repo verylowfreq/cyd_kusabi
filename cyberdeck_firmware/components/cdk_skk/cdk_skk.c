@@ -603,6 +603,14 @@ bool cdk_skk_key(cdk_skk_t *s, const cdk_key_t *k)
         return false;
     }
 
+    /* Ctrl-J 以外の Ctrl 付きは SKK が食べない。
+     * ▽ や ▼ の途中でも Ctrl-S（保存）や Ctrl-Q（終了）が届くようにする。
+     * 全部食べてしまうと、変換中だけキーが効かなくなり、
+     * 「壊れている」ようにしか見えない。 */
+    if ((k->mods & CDK_MOD_CTRL_BIT) != 0 && !is_ctrl(k, 'j')) {
+        return false;
+    }
+
     switch (s->state) {
     case CDK_SKK_ST_MIDASHI: used = key_midashi(s, k); break;
     case CDK_SKK_ST_OKURI:   used = key_okuri(s, k);   break;

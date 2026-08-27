@@ -4,7 +4,9 @@
  * M1: VT パーサ + 東雲 12px フォント + テキストコンソール
  * M2: WiFi + libssh2 による PTY 付き SSH
  * M3: 行編集つきシェル + GPIO / ADC / I2C
- * M4: microSD (FATFS)  ← いまここ
+ * M4: microSD (FATFS)
+ * M5: SKK 日本語入力
+ * M6: テキストエディタ  ← いまここ
  *
  * キーの行き先は 1 か所（route_key）だけで決める。
  * 条件分岐をあちこちに散らすと「このキーは誰が受け取るのか」が
@@ -43,7 +45,7 @@ static const char *TAG = "cyberdeck";
 
 /* tools/cdk.py がこの行を見て「起動完了」と判断する。 */
 #define CDK_READY_SENTINEL "#CDK-READY"
-#define CDK_VERSION        "cyberdeck M4"
+#define CDK_VERSION        "cyberdeck M6"
 
 /* フォントはフラッシュに焼き込む。SD もファイルシステムも要らない。 */
 extern const uint8_t font_start[] asm("_binary_shinonome12_cdkfont_start");
@@ -75,16 +77,24 @@ static cdk_skk_dict_t     s_skkdict;
 static cdk_skk_user_entry_t s_skkuser_store[192];
 static cdk_skk_user_t       s_skkuser;
 
+static cdk_edit_t s_edit;
+static char      *s_edit_arena;
+#define EDIT_ARENA_BYTES (128 * 1024)
+
 /* ------------------------------------------------------------------ */
 /* セッション                                                          */
 /* ------------------------------------------------------------------ */
 
 typedef enum {
     SESSION_SHELL = 0,
-    SESSION_SSH
+    SESSION_SSH,
+    SESSION_EDIT
 } session_t;
 
 static session_t s_session = SESSION_SHELL;
+
+/* 端末へ書く。実体はこの下の方にある。 */
+static void term_printf(const char *fmt, ...);
 
 /* 画面の持ち主が変わるときは入力中のものを捨てる。
  * 残すと、次の持ち主の画面に前の ▽ が出たままになる。 */
@@ -110,12 +120,47 @@ static void enter_ssh(void)
     cdk_shell_end(&s_shell);
 }
 
+/* 日本語入力のモードはセッションごとに覚える。
+ *
+ * 1 つにすると、エディタでかな入力にしたまま抜けたときにシェルの
+ * コマンドが変換され、`ls` が「ｌｓ」になって何も打てなくなる。
+ * 逆にエディタへ入るたびに Ctrl-J を押させるのも煩わしい。 */
+static cdk_skk_mode_t s_mode_shell = CDK_SKK_ASCII;
+static cdk_skk_mode_t s_mode_edit = CDK_SKK_ASCII;
+
+/* エディタは代替画面で開く。抜けたときにシェルの画面がそのまま戻る。 */
+static void enter_edit(void)
+{
+    s_mode_shell = cdk_skk_get_mode(&s_skk);
+    s_session = SESSION_EDIT;
+    drop_preedit();
+    cdk_skk_set_mode(&s_skk, s_mode_edit);
+    cdk_shell_end(&s_shell);
+    term_printf("\033[?1049h");
+    cdk_edit_set_size(&s_edit, s_term.cols, s_term.rows);
+    s_edit.mode_label = cdk_skk_mode_label(&s_skk);
+    cdk_edit_draw(&s_edit);
+    s_dirty = true;
+}
+
+static void leave_edit(void)
+{
+    s_mode_edit = cdk_skk_get_mode(&s_skk);
+    term_printf("\033[?1049l");
+    enter_shell();
+    cdk_skk_set_mode(&s_skk, s_mode_shell);
+}
+
 /* SKK が確定した文字列。シェルにも SSH にも同じ道を通す。 */
 static void skk_commit(void *ctx, const char *utf8, size_t len)
 {
     (void)ctx;
     if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
         (void)cdk_ssh_write((const uint8_t *)utf8, len);
+        return;
+    }
+    if (s_session == SESSION_EDIT) {
+        cdk_edit_insert(&s_edit, utf8, len);
         return;
     }
     /* シェルは キーイベント しか見ない。確定した文字列を
@@ -139,12 +184,32 @@ static void route_key(void *user, const cdk_key_t *k)
     /* 日本語入力はシェル / SSH の分岐より**前**に置く。ここを分岐の
      * 3 本目にすると「このキーは誰が受け取るのか」が追えなくなる。
      * 消費されなかったキーだけが下へ落ちる。 */
-    if (cdk_skk_key(&s_skk, k)) {
-        cdk_screen_set_preedit(&s_screen, cdk_skk_preedit(&s_skk));
+    const bool skk_used = cdk_skk_key(&s_skk, k);
+    cdk_screen_set_preedit(&s_screen, cdk_skk_preedit(&s_skk));
+    if (skk_used) {
+        s_dirty = true;
+        if (s_session == SESSION_EDIT) {
+            cdk_edit_draw(&s_edit); /* 確定した文字を反映する */
+        }
+        return;
+    }
+
+    if (s_session == SESSION_EDIT) {
+        (void)cdk_edit_key(&s_edit, k);
+        if (s_edit.want_save) {
+            s_edit.want_save = false;
+            (void)cdk_edit_file_save(&s_edit);
+        }
+        if (s_edit.want_quit) {
+            s_edit.want_quit = false;
+            leave_edit();
+            return;
+        }
+        s_edit.mode_label = cdk_skk_mode_label(&s_skk);
+        cdk_edit_draw(&s_edit);
         s_dirty = true;
         return;
     }
-    cdk_screen_set_preedit(&s_screen, cdk_skk_preedit(&s_skk));
 
     if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
         uint8_t out[16];
@@ -166,6 +231,8 @@ static void route_bytes(const uint8_t *data, size_t len)
         (void)cdk_ssh_write(data, len);
         return;
     }
+    /* エディタはキーイベントで受ける。SSH と違い、こちらでエスケープを
+     * 解いてよい（相手が解釈するわけではないので）。 */
     cdk_keys_decode_feed(&s_keydec, data, len);
     /* 1 回の送信で切れた ESC は「Esc キー」として確定させる。 */
     cdk_keys_decode_flush(&s_keydec);
@@ -436,6 +503,21 @@ static const cdk_skk_dict_t *app_skk_dict(void)
     return &s_skkdict;
 }
 
+static bool app_edit_open(const char *path)
+{
+    if (s_edit_arena == NULL) {
+        return false;
+    }
+    char full[CDK_EDIT_PATH_MAX];
+    cdk_edit_resolve_path(path, full, sizeof(full));
+    /* 読めなくても開く。理由はステータス行に出る。
+     * 「開けません」で弾くと、新しいファイルが作れない。 */
+    (void)cdk_edit_file_load(&s_edit, full);
+    s_edit.mode_label = cdk_skk_mode_label(&s_skk);
+    enter_edit();
+    return true;
+}
+
 static void app_reboot(void)
 {
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -501,6 +583,7 @@ void app_main(void)
         .skk_set_mode = app_skk_set_mode,
         .skk_get_mode = app_skk_get_mode,
         .skk_dict = app_skk_dict,
+        .edit_open = app_edit_open,
         .reboot = app_reboot,
     };
     /* コマンド表を繋いで渡す。help は登録された表をそのまま見る。
@@ -510,9 +593,10 @@ void app_main(void)
     _Static_assert(ALL_CMDS_MAX >= 32, "コマンド表が小さすぎる");
     static cdk_shell_cmd_t   all_cmds[ALL_CMDS_MAX];
     const cdk_shell_cmd_t   *tables[] = {APP_COMMANDS, APP_FS_COMMANDS,
-                                         APP_SKK_COMMANDS};
+                                         APP_SKK_COMMANDS, APP_EDIT_COMMANDS};
     const size_t             counts[] = {APP_COMMANDS_COUNT, APP_FS_COMMANDS_COUNT,
-                                         APP_SKK_COMMANDS_COUNT};
+                                         APP_SKK_COMMANDS_COUNT,
+                                         APP_EDIT_COMMANDS_COUNT};
     size_t ncmds = 0;
     for (size_t t = 0; t < sizeof(tables) / sizeof(tables[0]); t++) {
         for (size_t i = 0; i < counts[t]; i++) {
@@ -544,6 +628,15 @@ void app_main(void)
     /* 日本語入力。辞書は SD が優先で、無ければフラッシュの skkdict。
      * SD のマウントより後に開くこと。順番を逆にすると、SD に辞書を
      * 置いてもフラッシュのほうが使われる。 */
+    /* エディタの本文を置く領域。起動時に 1 回だけ確保する（DESIGN.md §14）。 */
+    s_edit_arena = (char *)heap_caps_malloc(EDIT_ARENA_BYTES, MALLOC_CAP_SPIRAM);
+    if (s_edit_arena != NULL) {
+        cdk_edit_init(&s_edit, s_edit_arena, EDIT_ARENA_BYTES, shell_out, NULL);
+        cdk_edit_set_size(&s_edit, cols, rows);
+    } else {
+        ESP_LOGE(TAG, "エディタの領域を確保できません");
+    }
+
     cdk_skk_init(&s_skk, skk_commit, NULL);
     cdk_skk_user_init(&s_skkuser, s_skkuser_store,
                       (int)(sizeof(s_skkuser_store) / sizeof(s_skkuser_store[0])));

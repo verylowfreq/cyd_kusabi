@@ -6,6 +6,7 @@
  */
 #pragma once
 
+#include "cdk_edit.h"
 #include "cdk_shell.h"
 #include "cdk_skk.h"
 #include "cdk_term.h"
@@ -28,8 +29,16 @@ typedef struct {
     cdk_skk_mode_t        (*skk_get_mode)(void);
     const cdk_skk_dict_t *(*skk_dict)(void);
 
+    /* エディタを開いてセッションを切り替える。 */
+    bool (*edit_open)(const char *path);
+
     void (*reboot)(void);
 } app_ctx_t;
+
+/* main/cdk_editcmds.c。SD との読み書きだけを持つ。 */
+void cdk_edit_resolve_path(const char *arg, char *out, size_t cap);
+bool cdk_edit_file_load(cdk_edit_t *e, const char *path);
+bool cdk_edit_file_save(cdk_edit_t *e);
 
 /* コマンド表。main.c が 2 つを繋いでシェルに渡す。 */
 extern const cdk_shell_cmd_t APP_COMMANDS[];
@@ -40,3 +49,6 @@ extern const size_t          APP_FS_COMMANDS_COUNT;
 
 extern const cdk_shell_cmd_t APP_SKK_COMMANDS[];
 extern const size_t          APP_SKK_COMMANDS_COUNT;
+
+extern const cdk_shell_cmd_t APP_EDIT_COMMANDS[];
+extern const size_t          APP_EDIT_COMMANDS_COUNT;
