@@ -279,6 +279,31 @@ static void test_scroll(void)
     T_EQ_INT(cdk_edit_line_no(&E), 5);
     key(CDK_K_PGUP, 0, 0);
     T_EQ_INT(cdk_edit_line_no(&E), 1);
+
+    T_CASE("最終行で Down しても動かない");
+    /* 「次の表示行があるか」の判断は next_row_start に一本化してある。
+     * ここが緩むと、末尾に改行が無い行で Down が本文の末尾へ飛ぶ。
+     * 見た目は End を押したのと同じなので気づきにくい。 */
+    setup(COLS, ROWS);
+    cdk_edit_new(&E, "a.txt");
+    type("abc"); /* 末尾に改行なし */
+    key(CDK_K_HOME, 0, 0);
+    T_EQ_INT((int)E.cursor, 0);
+    key(CDK_K_DOWN, 0, 0);
+    T_EQ_INT((int)E.cursor, 0); /* 動かない */
+    key(CDK_K_UP, 0, 0);
+    T_EQ_INT((int)E.cursor, 0);
+
+    T_CASE("末尾が改行なら空の最終行へ行ける");
+    setup(COLS, ROWS);
+    cdk_edit_new(&E, "a.txt");
+    type("abc\n");
+    key(CDK_K_UP, 0, 0);
+    T_EQ_INT((int)E.cursor, 0);
+    key(CDK_K_DOWN, 0, 0);
+    T_EQ_INT((int)E.cursor, 4); /* 改行の次 = 空の行 */
+    key(CDK_K_DOWN, 0, 0);
+    T_EQ_INT((int)E.cursor, 4); /* その先は無い */
 }
 
 static void test_wrap_scroll(void)
