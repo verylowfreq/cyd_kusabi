@@ -27,6 +27,7 @@ set(CDK_CORE_MODULES
     cdk_shell
     cdk_screen
     cdk_skk
+    cdk_edit
 )
 
 set(CDK_CORE_SRCS "")
@@ -79,6 +80,7 @@ set(CDK_TESTS
     test_skk_dict
     test_skk
     test_skk_user
+    test_edit
 )
 
 foreach(t ${CDK_TESTS})
