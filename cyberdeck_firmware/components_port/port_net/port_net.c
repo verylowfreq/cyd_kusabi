@@ -8,7 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "libssh2.h"
-#include "nvs_flash.h"
+#include "cdk_cfg.h"
 
 #include <string.h>
 
@@ -81,12 +81,7 @@ esp_err_t cdk_wifi_init(void)
         return ESP_OK;
     }
 
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_RETURN_ON_ERROR(nvs_flash_erase(), TAG, "nvs_flash_erase");
-        err = nvs_flash_init();
-    }
-    ESP_RETURN_ON_ERROR(err, TAG, "nvs_flash_init");
+    ESP_RETURN_ON_ERROR(cdk_cfg_init(), TAG, "cdk_cfg_init");
 
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "esp_netif_init");
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event_loop");

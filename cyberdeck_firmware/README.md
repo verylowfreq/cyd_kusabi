@@ -3,14 +3,14 @@
 ESP32-S3 サイバーデックのファームウェア。設計は [DESIGN.md](DESIGN.md)、
 プロジェクト全体の背景は [../ABOUT.md](../ABOUT.md)。
 
-現在の到達点: **M2 基本達成**
+現在の到達点: **M3 完了**
 
 - M0: ビルド基盤 / ホスト側テスト / LCD 表示 / スクリーンショット転送 / 有限時間のログ取得
 - M1: VT パーサ / 東雲 12px フォント / テキストコンソール（試作機で 53桁 x 20行）
 - M2: WiFi + libssh2 による **PTY 付き SSH**。実機で `top` が動く
+- M3: 行編集つきシェル + GPIO / ADC / I2C。認証情報を NVS へ
 
-次は M3（シェルと GPIO/I2C/ADC/UART）。
-M2 の残り（known_hosts・NVS・公開鍵認証・リサイズ通知）は DESIGN.md §13 を参照。
+次は M4（microSD）。残件は DESIGN.md §13 を参照。
 
 ---
 
@@ -91,9 +91,14 @@ components/        ESP-IDF に依存しない純 C コア。ホストでもビ�
   cdk_term/          VT パーサ + 画面バッファ
   cdk_keys/          キーイベント → 端末が期待するバイト列
   cdk_screen/        セルグリッド → キャンバス描画
+  cdk_shell/         行編集・履歴・補完・コマンド実行
 components_port/   ESP-IDF 依存の薄いポート層
   port_display/      BSP + esp_lcd。キャンバスをパネルへ転送
   port_link/         USB-Serial-JTAG の制御チャネル
+  port_cfg/          NVS に置く設定（認証情報）
+  port_net/          WiFi + SSH クライアント
+  port_periph/       GPIO / ADC / I2C
+  libssh2/           ベンダリングした libssh2 1.11.1
 main/              起動とタスク構成だけ
 host/              ホスト側 CMake / ctest / 基準レンダラ / VT フィクスチャ
 tools/             PC 側スクリプト（cdk.py / mkfont.py）

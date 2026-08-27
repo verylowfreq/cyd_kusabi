@@ -12,6 +12,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "cdk_text.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -54,6 +56,47 @@ typedef struct {
  * app_cursor は DECCKM (ESC[?1h)。有効だとカーソルキーが ESC O A になる。
  * vi や less がこれを見ている。 */
 size_t cdk_keys_encode(const cdk_key_t *k, bool app_cursor, uint8_t *out, size_t cap);
+
+
+/* ---------------- バイト列 → キーイベント ----------------
+ *
+ * cdk_keys_encode の逆。シェルがエスケープ列を見なくて済むように、
+ * 解釈をここ 1 か所に閉じ込める。
+ * ホスト側テストで往復（encode -> decode）を検証しているので、
+ * 対応表がずれたら必ず落ちる。
+ */
+
+typedef void (*cdk_key_fn)(void *user, const cdk_key_t *key);
+
+typedef enum {
+    CDK_KD_GROUND = 0,
+    CDK_KD_ESC,
+    CDK_KD_CSI,
+    CDK_KD_SS3
+} cdk_keys_decode_state_t;
+
+typedef struct {
+    cdk_keys_decode_state_t state;
+    int      params[4];
+    int      nparams;
+    bool     param_seen;
+    cdk_utf8_t utf8;
+    /* Alt(ESC 前置)は次に確定するキーに付く。UTF-8 が複数バイトに
+     * またがるので、文字が組み上がるまで持ち越す必要がある。 */
+    uint8_t  pending_mods;
+
+    cdk_key_fn on_key;
+    void      *user;
+
+    uint32_t stat_unknown; /* 捨てたシーケンスの数 */
+} cdk_keys_decoder_t;
+
+void cdk_keys_decode_init(cdk_keys_decoder_t *d, cdk_key_fn on_key, void *user);
+void cdk_keys_decode_feed(cdk_keys_decoder_t *d, const void *data, size_t len);
+
+/* 入力が途切れたところで呼ぶ。ESC 単独が保留されていれば Esc キーとして吐く。
+ * これを呼ばないと「Esc を 1 回押した」が永久に確定しない。 */
+void cdk_keys_decode_flush(cdk_keys_decoder_t *d);
 
 #ifdef __cplusplus
 }

@@ -24,6 +24,7 @@ set(CDK_CORE_MODULES
     cdk_font
     cdk_term
     cdk_keys
+    cdk_shell
     cdk_screen
 )
 
@@ -67,6 +68,8 @@ set(CDK_TESTS
     test_font
     test_term
     test_keys
+    test_keys_decode
+    test_shell
     test_screen
 )
 
@@ -83,6 +86,13 @@ endforeach()
 
 # components/ に ESP-IDF 依存が混ざっていないことを機械的に保証する。
 # ここが崩れるとホストでのテストができなくなるので、テストとして常時回す。
+# ESP-IDF 側の CMakeLists に .c を足し忘れると、ホストは GLOB なので緑のまま
+# 実機のリンクだけが落ちる。先に止める。
+add_test(NAME sources_listed
+         COMMAND ${CMAKE_COMMAND}
+                 -DCORE_DIR=${CDK_CORE_DIR}
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_sources_listed.cmake)
+
 add_test(NAME no_idf_in_core
          COMMAND ${CMAKE_COMMAND}
                  -DCORE_DIR=${CDK_CORE_DIR}

@@ -1,13 +1,18 @@
-/* Cyberdeck ファームウェア — M1
+/* Cyberdeck ファームウェア
  *
  * M0: ビルド基盤 / ホスト側テスト / LCD 表示 / スクショ転送 / 有限時間のログ取得
- * M1: VT パーサ + 東雲 12px フォント + テキストコンソール  ← いまここ
+ * M1: VT パーサ + 東雲 12px フォント + テキストコンソール
+ * M2: WiFi + libssh2 による PTY 付き SSH
+ * M3: 行編集つきシェル + GPIO / ADC / I2C  ← いまここ
  *
- * まだシェルも SSH も無いので、制御チャネルから来た TEXT/KEY を
- * そのままターミナルに流し込む（ローカルエコー）。
- * これで「バイト列 → 画面」の経路が実機で丸ごと検証できる。
+ * キーの行き先は 1 か所（route_key）だけで決める。
+ * 条件分岐をあちこちに散らすと「このキーは誰が受け取るのか」が
+ * 実装の副作用になって追えなくなる。
  */
+#include "app.h"
+
 #include "cdk_canvas.h"
+#include "cdk_cfg.h"
 #include "cdk_display.h"
 #include "cdk_font.h"
 #include "cdk_keys.h"
@@ -15,6 +20,7 @@
 #include "cdk_net.h"
 #include "cdk_proto.h"
 #include "cdk_screen.h"
+#include "cdk_shell.h"
 #include "cdk_term.h"
 
 #include "esp_heap_caps.h"
@@ -33,7 +39,7 @@ static const char *TAG = "cyberdeck";
 
 /* tools/cdk.py がこの行を見て「起動完了」と判断する。 */
 #define CDK_READY_SENTINEL "#CDK-READY"
-#define CDK_VERSION        "cyberdeck M1"
+#define CDK_VERSION        "cyberdeck M3"
 
 /* フォントはフラッシュに焼き込む。SD もファイルシステムも要らない。 */
 extern const uint8_t font_start[] asm("_binary_shinonome12_cdkfont_start");
@@ -52,7 +58,90 @@ static cdk_font_t         s_font;
 static cdk_screen_t       s_screen;
 static cdk_term_t         s_term;
 static void              *s_termmem;
-static bool               s_dirty; /* 再描画が要るか */
+static bool               s_dirty;
+
+static cdk_shell_t        s_shell;
+static cdk_keys_decoder_t s_keydec;
+static app_ctx_t          s_ctx;
+
+/* ------------------------------------------------------------------ */
+/* セッション                                                          */
+/* ------------------------------------------------------------------ */
+
+typedef enum {
+    SESSION_SHELL = 0,
+    SESSION_SSH
+} session_t;
+
+static session_t s_session = SESSION_SHELL;
+
+static void enter_shell(void)
+{
+    s_session = SESSION_SHELL;
+    cdk_shell_begin(&s_shell);
+    s_dirty = true;
+}
+
+static void enter_ssh(void)
+{
+    s_session = SESSION_SSH;
+    cdk_shell_end(&s_shell);
+}
+
+/* キーの行き先を決める唯一の場所。 */
+static void route_key(void *user, const cdk_key_t *k)
+{
+    (void)user;
+
+    if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
+        uint8_t out[16];
+        const size_t n = cdk_keys_encode(k, s_term.app_cursor_keys, out, sizeof(out));
+        if (n > 0) {
+            (void)cdk_ssh_write(out, n);
+        }
+        return;
+    }
+    cdk_shell_key(&s_shell, k);
+}
+
+/* 端末の入力バイト列（cdk.py type や将来の他の入力源）を流し込む。
+ * SSH に入っているときは解釈せずそのまま送る。リモートの CLI が
+ * 自分でエスケープ列を解釈するので、こちらで触ると壊れる。 */
+static void route_bytes(const uint8_t *data, size_t len)
+{
+    if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
+        (void)cdk_ssh_write(data, len);
+        return;
+    }
+    cdk_keys_decode_feed(&s_keydec, data, len);
+    /* 1 回の送信で切れた ESC は「Esc キー」として確定させる。 */
+    cdk_keys_decode_flush(&s_keydec);
+}
+
+/* シェルの出力は端末へ。 */
+static void shell_out(void *user, const char *data, size_t len)
+{
+    (void)user;
+    cdk_term_feed(&s_term, data, len);
+    s_dirty = true;
+}
+
+/* 端末が返す応答 (DA / DSR)。
+ *
+ * SSH に返さないと、CSI 6n でカーソル位置を問い合わせて待つ CLI が
+ * 永久に固まる。しかも「端末のバグ」ではなく「CLI が謎のハング」に見える。 */
+static void on_term_reply(void *user, const uint8_t *data, size_t len)
+{
+    (void)user;
+    if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
+        (void)cdk_ssh_write(data, len);
+    }
+    /* シェルは問い合わせないので、それ以外では捨てる。 */
+}
+
+/* ------------------------------------------------------------------ */
+/* 制御チャネル                                                        */
+/* ------------------------------------------------------------------ */
 
 static void send_screenshot(void)
 {
@@ -76,21 +165,6 @@ static void send_screenshot(void)
     ESP_LOGI(TAG, "スクリーンショット送信 %ux%u", info.width, info.height);
 }
 
-/* 端末が返す応答 (DA / DSR)。
- *
- * これを送り返さないと、CSI 6n でカーソル位置を問い合わせて待つ CLI が
- * 永久に固まる。しかも「端末のバグ」ではなく「CLI が謎のハング」に見えるので、
- * キー入力を SSH へ繋ぐのと同時に必ず配線すること。 */
-static void on_term_reply(void *user, const uint8_t *data, size_t len)
-{
-    (void)user;
-    if (cdk_ssh_is_open()) {
-        (void)cdk_ssh_write(data, len);
-    } else {
-        ESP_LOGI(TAG, "端末からの応答 %u バイト（送り先なし）", (unsigned)len);
-    }
-}
-
 static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t len)
 {
     (void)user;
@@ -105,12 +179,7 @@ static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t 
         break;
 
     case CDK_MSG_TEXT:
-        if (cdk_ssh_is_open()) {
-            (void)cdk_ssh_write(payload, len);
-        } else {
-            cdk_term_feed(&s_term, payload, len);
-            s_dirty = true;
-        }
+        route_bytes(payload, len);
         break;
 
     case CDK_MSG_KEY:
@@ -118,17 +187,7 @@ static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t 
             cdk_wire_key_t w;
             memcpy(&w, payload, sizeof(w));
             const cdk_key_t k = {w.keycode, w.mods, w.codepoint};
-            uint8_t out[16];
-            const size_t n = cdk_keys_encode(&k, s_term.app_cursor_keys, out, sizeof(out));
-            if (n > 0) {
-                if (cdk_ssh_is_open()) {
-                    (void)cdk_ssh_write(out, n);
-                } else {
-                    /* SSH 未接続のときはローカルエコー。M3 のシェルがここを引き取る。 */
-                    cdk_term_feed(&s_term, out, n);
-                    s_dirty = true;
-                }
-            }
+            route_key(NULL, &k);
         }
         break;
 
@@ -138,10 +197,14 @@ static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t 
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* 起動時の表示                                                        */
+/* ------------------------------------------------------------------ */
+
 /* 端末に 1 行出して即座に画面へ反映する。起動中の進捗を実機で見せるため。 */
 static void term_printf(const char *fmt, ...)
 {
-    char buf[160];
+    char buf[192];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -150,23 +213,79 @@ static void term_printf(const char *fmt, ...)
         return;
     }
     if (n >= (int)sizeof(buf)) {
-        n = (int)sizeof(buf) - 1; /* 切り詰められた */
+        n = (int)sizeof(buf) - 1;
     }
     cdk_term_feed(&s_term, buf, (size_t)n);
     cdk_screen_draw(&s_screen, &s_canvas, &s_term, false);
     (void)cdk_display_flush(&s_canvas);
 }
 
-static void connect_wifi(void)
+static void draw_banner(void)
 {
+    cdk_term_feed(&s_term, banner_start, (size_t)(banner_end - banner_start));
+    s_dirty = true;
+}
+
+/* ------------------------------------------------------------------ */
+/* 設定と接続                                                          */
+/* ------------------------------------------------------------------ */
+
+static char s_wifi_ssid[64];
+static char s_wifi_psk[80];
+static char s_ssh_host[80];
+static char s_ssh_user[48];
+static char s_ssh_pass[80];
+
+/* 設定値を NVS から読む。無ければ secrets.h（ビルド時に焼いた値）で補い、
+ * その場で NVS に書いて次回以降は NVS だけで動くようにする。
+ *
+ * 目的は認証情報をファームウェアのバイナリから外すこと。
+ * secrets.h は「初回の種」としてだけ使う。 */
+static void cfg_or_seed(const char *key, const char *seed, char *buf, size_t cap)
+{
+    if (cdk_cfg_get(key, buf, cap) == ESP_OK && buf[0] != '\0') {
+        return;
+    }
+    if (seed == NULL || seed[0] == '\0') {
+        buf[0] = '\0';
+        return;
+    }
+    const esp_err_t err = cdk_cfg_set(key, seed);
+    ESP_LOGI(TAG, "%s を secrets.h から NVS へ書きました (%s)", key,
+             esp_err_to_name(err));
+    strncpy(buf, seed, cap - 1);
+    buf[cap - 1] = '\0';
+}
+
+static void load_config(void)
+{
+    if (cdk_cfg_init() != ESP_OK) {
+        ESP_LOGE(TAG, "設定を読めません");
+        return;
+    }
+    cfg_or_seed(CDK_CFG_WIFI_SSID, CDK_WIFI_SSID, s_wifi_ssid, sizeof(s_wifi_ssid));
+    cfg_or_seed(CDK_CFG_WIFI_PSK, CDK_WIFI_PSK, s_wifi_psk, sizeof(s_wifi_psk));
+    cfg_or_seed(CDK_CFG_SSH_HOST, CDK_SSH_HOST, s_ssh_host, sizeof(s_ssh_host));
+    cfg_or_seed(CDK_CFG_SSH_USER, CDK_SSH_USER, s_ssh_user, sizeof(s_ssh_user));
+    cfg_or_seed(CDK_CFG_SSH_PASS, CDK_SSH_PASS, s_ssh_pass, sizeof(s_ssh_pass));
+}
+
+static void app_wifi_connect(void)
+{
+    load_config();
+
+    if (s_wifi_ssid[0] == '\0') {
+        term_printf("\033[33mwifi  : 未設定。set wifi.ssid <名前> で設定\033[0m\r\n");
+        return;
+    }
     if (cdk_wifi_init() != ESP_OK) {
         term_printf("\033[31mwifi  : 初期化に失敗\033[0m\r\n");
         return;
     }
 
-    term_printf("wifi  : %s に接続中...\r\n", CDK_WIFI_SSID);
+    term_printf("wifi  : %s に接続中...\r\n", s_wifi_ssid);
 
-    const esp_err_t err = cdk_wifi_connect(CDK_WIFI_SSID, CDK_WIFI_PSK, 20000);
+    const esp_err_t err = cdk_wifi_connect(s_wifi_ssid, s_wifi_psk, 20000);
     if (err != ESP_OK) {
         term_printf("\033[31mwifi  : 失敗 %s reason=%d\033[0m\r\n",
                     esp_err_to_name(err), cdk_wifi_last_disconnect_reason());
@@ -176,23 +295,31 @@ static void connect_wifi(void)
     char ip[20];
     cdk_wifi_ip(ip, sizeof(ip));
     term_printf("wifi  : \033[32m接続 %s\033[0m\r\n", ip);
-    term_printf("\033[33m$ \033[0m");
 }
 
-static void connect_ssh(void)
+static void app_wifi_status(void)
 {
-    if (!cdk_wifi_is_connected()) {
-        return;
+    /* いまは cmd_wifi が直接 cdk_wifi_* を読むので何もしない。
+     * 表示の体裁をコマンド側に閉じ込めておきたいのでフックだけ残す。 */
+}
+
+static bool app_ssh_open(void)
+{
+    load_config();
+
+    if (s_ssh_host[0] == '\0' || s_ssh_user[0] == '\0') {
+        term_printf("\033[31mssh   : 接続先が未設定 (set ssh.host / ssh.user)\033[0m\r\n");
+        return false;
     }
 
-    term_printf("ssh   : %s@%s に接続中...\r\n", CDK_SSH_USER, CDK_SSH_HOST);
+    term_printf("ssh   : %s@%s に接続中...\r\n", s_ssh_user, s_ssh_host);
 
     /* PTY のサイズは端末の実値。最終ハードの 80x26 を決め打ちしない。 */
     const cdk_ssh_config_t cfg = {
-        .host = CDK_SSH_HOST,
+        .host = s_ssh_host,
         .port = 22,
-        .user = CDK_SSH_USER,
-        .password = CDK_SSH_PASS,
+        .user = s_ssh_user,
+        .password = s_ssh_pass,
         .term = "xterm-256color",
         .cols = s_term.cols,
         .rows = s_term.rows,
@@ -201,17 +328,33 @@ static void connect_ssh(void)
     const esp_err_t err = cdk_ssh_connect(&cfg);
     if (err != ESP_OK) {
         term_printf("\033[31mssh   : 接続失敗 %s\033[0m\r\n", esp_err_to_name(err));
-        return;
+        return false;
     }
-    term_printf("ssh   : \033[32m接続 PTY %dx%d\033[0m\r\n", cfg.cols, cfg.rows);
     ESP_LOGI(TAG, "SSH 接続完了。以降の画面はリモートの出力。");
+    enter_ssh();
+    return true;
 }
 
-static void draw_banner(void)
+static void app_ssh_close(void)
 {
-    cdk_term_feed(&s_term, banner_start, (size_t)(banner_end - banner_start));
-    s_dirty = true;
+    cdk_ssh_close();
+    if (s_session == SESSION_SSH) {
+        enter_shell();
+    }
 }
+
+static bool app_ssh_is_open(void)
+{
+    return cdk_ssh_is_open();
+}
+
+static void app_reboot(void)
+{
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_restart();
+}
+
+/* ------------------------------------------------------------------ */
 
 void app_main(void)
 {
@@ -254,39 +397,59 @@ void app_main(void)
     ESP_ERROR_CHECK(cdk_display_flush(&s_canvas));
     s_dirty = false;
 
-    /* M2: libssh2 が実機で生きているかを起動時に一度だけ確かめる。 */
-    (void)cdk_net_probe();
+    /* 入力の解釈。バイト列 → キーイベント → route_key。 */
+    cdk_keys_decode_init(&s_keydec, route_key, NULL);
+
+    /* シェル。コマンドは main/cdk_commands.c。 */
+    cdk_shell_init(&s_shell, shell_out, NULL);
+    s_ctx = (app_ctx_t){
+        .sh = &s_shell,
+        .term = &s_term,
+        .wifi_connect = app_wifi_connect,
+        .wifi_status = app_wifi_status,
+        .ssh_open = app_ssh_open,
+        .ssh_close = app_ssh_close,
+        .ssh_is_open = app_ssh_is_open,
+        .reboot = app_reboot,
+    };
+    cdk_shell_set_commands(&s_shell, APP_COMMANDS, APP_COMMANDS_COUNT, &s_ctx);
 
     cdk_link_set_handler(on_frame, NULL);
     ESP_ERROR_CHECK(cdk_link_init());
     (void)cdk_link_send(CDK_MSG_READY, CDK_VERSION, (uint32_t)strlen(CDK_VERSION));
 
-    connect_wifi();
-    connect_ssh();
+    /* 起動時に WiFi まで繋いでおく。SSH は `ssh` コマンドで入る。
+     * 自動で SSH に入るとシェルに触れないまま起動が終わってしまう。 */
+    app_wifi_connect();
 
     ESP_LOGI(TAG, "空きヒープ internal=%u spiram=%u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     ESP_LOGI(TAG, "%s %s %dx%d", CDK_READY_SENTINEL, CDK_VERSION, cols, rows);
 
+    term_printf("\r\nhelp でコマンド一覧\r\n");
+    enter_shell();
+
     while (true) {
         cdk_link_poll(5);
 
         /* SSH の受信をそのまま端末へ流す。DESIGN.md §8.2 の通り
          * 専用タスクは作らず、メインループが両方を見る。 */
-        if (cdk_ssh_is_open()) {
-            uint8_t rx[512];
-            for (int i = 0; i < 8; i++) { /* 1 周で汲みすぎない */
-                const int n = cdk_ssh_read(rx, sizeof(rx));
-                if (n > 0) {
-                    cdk_term_feed(&s_term, rx, (size_t)n);
-                    s_dirty = true;
-                    continue;
+        if (s_session == SESSION_SSH) {
+            if (!cdk_ssh_is_open()) {
+                term_printf("\r\n\033[31mssh   : 切断されました\033[0m\r\n");
+                enter_shell();
+            } else {
+                uint8_t rx[512];
+                for (int i = 0; i < 8; i++) { /* 1 周で汲みすぎない */
+                    const int n = cdk_ssh_read(rx, sizeof(rx));
+                    if (n > 0) {
+                        cdk_term_feed(&s_term, rx, (size_t)n);
+                        s_dirty = true;
+                        continue;
+                    }
+                    break;
                 }
-                if (n < 0) {
-                    term_printf("\r\n\033[31mssh   : 切断されました\033[0m\r\n");
-                }
-                break;
             }
         }
 

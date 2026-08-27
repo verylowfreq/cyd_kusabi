@@ -1,0 +1,350 @@
+/* シェルの組み込みコマンド。
+ *
+ * ここは「引数を解いて port 層を呼び、結果を整形する」だけに留める。
+ * 実際の操作は components_port/ 側が持つ。
+ */
+#include "app.h"
+
+#include "cdk_cfg.h"
+#include "cdk_net.h"
+#include "cdk_periph.h"
+
+#include "esp_app_desc.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+static app_ctx_t *ctx_of(void *user)
+{
+    return (app_ctx_t *)user;
+}
+
+/* port_periph へ渡す printf 風の出力先 */
+static void periph_out(void *user, const char *fmt, ...)
+{
+    cdk_shell_t *sh = (cdk_shell_t *)user;
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return;
+    }
+    if (n >= (int)sizeof(buf)) {
+        n = (int)sizeof(buf) - 1;
+    }
+    buf[n] = '\0';
+    cdk_shell_write(sh, buf);
+}
+
+/* ------------------------------------------------------------------ */
+
+static int cmd_help(int argc, char **argv, void *user)
+{
+    (void)argc;
+    (void)argv;
+    cdk_shell_t *sh = ctx_of(user)->sh;
+
+    cdk_shell_write(sh, "\033[1m使えるコマンド\033[0m\r\n");
+    for (size_t i = 0; i < APP_COMMANDS_COUNT; i++) {
+        cdk_shell_printf(sh, "  \033[36m%-8s\033[0m %s\r\n", APP_COMMANDS[i].name,
+                         APP_COMMANDS[i].usage);
+    }
+    return 0;
+}
+
+static int cmd_clear(int argc, char **argv, void *user)
+{
+    (void)argc;
+    (void)argv;
+    cdk_shell_write(ctx_of(user)->sh, "\033[2J\033[H");
+    return 0;
+}
+
+static int cmd_echo(int argc, char **argv, void *user)
+{
+    cdk_shell_t *sh = ctx_of(user)->sh;
+    for (int i = 1; i < argc; i++) {
+        cdk_shell_printf(sh, "%s%s", (i > 1) ? " " : "", argv[i]);
+    }
+    cdk_shell_write(sh, "\r\n");
+    return 0;
+}
+
+static int cmd_history(int argc, char **argv, void *user)
+{
+    (void)argc;
+    (void)argv;
+    cdk_shell_t *sh = ctx_of(user)->sh;
+    /* 新しいものが 0 番なので、古い順に並べ直して出す */
+    for (int i = sh->hist_count - 1; i >= 0; i--) {
+        cdk_shell_printf(sh, "%3d  %s\r\n", sh->hist_count - i, sh->hist[i]);
+    }
+    return 0;
+}
+
+static int cmd_info(int argc, char **argv, void *user)
+{
+    (void)argc;
+    (void)argv;
+    app_ctx_t *ctx = ctx_of(user);
+    cdk_shell_t *sh = ctx->sh;
+
+    const esp_app_desc_t *app = esp_app_get_description();
+    cdk_shell_printf(sh, "app     : %s %s\r\n", app->project_name, app->version);
+    cdk_shell_printf(sh, "idf     : %s\r\n", app->idf_ver);
+    cdk_shell_printf(sh, "端末    : %d桁 x %d行\r\n", ctx->term->cols, ctx->term->rows);
+    cdk_shell_printf(sh, "稼働    : %llu 秒\r\n",
+                     (unsigned long long)(esp_timer_get_time() / 1000000));
+
+    char ip[20];
+    cdk_wifi_ip(ip, sizeof(ip));
+    cdk_shell_printf(sh, "wifi    : %s (%s)\r\n",
+                     cdk_wifi_is_connected() ? "接続" : "未接続", ip);
+    cdk_shell_printf(sh, "ssh     : %s\r\n", ctx->ssh_is_open() ? "接続" : "未接続");
+    return 0;
+}
+
+static int cmd_free(int argc, char **argv, void *user)
+{
+    (void)argc;
+    (void)argv;
+    cdk_shell_t *sh = ctx_of(user)->sh;
+    cdk_shell_printf(sh, "internal: %u バイト空き (最大ブロック %u)\r\n",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    cdk_shell_printf(sh, "spiram  : %u バイト空き (最大ブロック %u)\r\n",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    return 0;
+}
+
+static int cmd_reboot(int argc, char **argv, void *user)
+{
+    (void)argc;
+    (void)argv;
+    app_ctx_t *ctx = ctx_of(user);
+    cdk_shell_write(ctx->sh, "再起動します...\r\n");
+    ctx->reboot();
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 設定                                                                */
+/* ------------------------------------------------------------------ */
+
+static int cmd_set(int argc, char **argv, void *user)
+{
+    cdk_shell_t *sh = ctx_of(user)->sh;
+
+    if (argc == 1) {
+        const char *const *keys = cdk_cfg_keys();
+        for (size_t i = 0; keys[i] != NULL; i++) {
+            char buf[128];
+            const bool has = cdk_cfg_get(keys[i], buf, sizeof(buf)) == ESP_OK;
+            if (!has || buf[0] == '\0') {
+                cdk_shell_printf(sh, "  %-10s \033[90m(未設定)\033[0m\r\n", keys[i]);
+            } else if (cdk_cfg_is_secret(keys[i])) {
+                /* パスワードは伏せる。ただし「設定されている」ことと桁数は出す。
+                 * 全部隠すと設定できているのか分からず、かえって危ない。 */
+                cdk_shell_printf(sh, "  %-10s \033[90m(設定済み %u 文字)\033[0m\r\n",
+                                 keys[i], (unsigned)strlen(buf));
+            } else {
+                cdk_shell_printf(sh, "  %-10s %s\r\n", keys[i], buf);
+            }
+        }
+        return 0;
+    }
+
+    if (argc == 2) {
+        cdk_shell_printf(sh, "使い方: set <キー> <値>   （空文字列で削除）\r\n");
+        return 1;
+    }
+
+    const esp_err_t err = cdk_cfg_set(argv[1], argv[2]);
+    if (err != ESP_OK) {
+        cdk_shell_printf(sh, "\033[31m書けません: %s\033[0m\r\n", esp_err_to_name(err));
+        return 1;
+    }
+    cdk_shell_printf(sh, "%s を設定しました\r\n", argv[1]);
+    return 0;
+}
+
+static int cmd_wifi(int argc, char **argv, void *user)
+{
+    app_ctx_t *ctx = ctx_of(user);
+    cdk_shell_t *sh = ctx->sh;
+
+    if (argc >= 2 && strcmp(argv[1], "connect") == 0) {
+        ctx->wifi_connect();
+        return 0;
+    }
+    if (argc == 1 || strcmp(argv[1], "status") == 0) {
+        char ip[20];
+        cdk_wifi_ip(ip, sizeof(ip));
+        cdk_shell_printf(sh, "%s  ip=%s  直近の切断理由=%d\r\n",
+                         cdk_wifi_is_connected() ? "\033[32m接続\033[0m" : "未接続", ip,
+                         cdk_wifi_last_disconnect_reason());
+        return 0;
+    }
+    cdk_shell_write(sh, "使い方: wifi [status|connect]\r\n");
+    return 1;
+}
+
+static int cmd_ssh(int argc, char **argv, void *user)
+{
+    app_ctx_t *ctx = ctx_of(user);
+    cdk_shell_t *sh = ctx->sh;
+
+    if (argc >= 2 && strcmp(argv[1], "close") == 0) {
+        ctx->ssh_close();
+        cdk_shell_write(sh, "切断しました\r\n");
+        return 0;
+    }
+    if (!cdk_wifi_is_connected()) {
+        cdk_shell_write(sh, "\033[31mWiFi が繋がっていません\033[0m\r\n");
+        return 1;
+    }
+    if (!ctx->ssh_open()) {
+        return 1;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 周辺                                                                */
+/* ------------------------------------------------------------------ */
+
+static int cmd_gpio(int argc, char **argv, void *user)
+{
+    cdk_shell_t *sh = ctx_of(user)->sh;
+
+    if (argc < 3) {
+        cdk_shell_write(sh, "使い方: gpio mode <pin> <in|in_pu|in_pd|out>\r\n"
+                            "        gpio set  <pin> <0|1>\r\n"
+                            "        gpio get  <pin>\r\n");
+        return 1;
+    }
+    const int pin = atoi(argv[2]);
+
+    const char *why = NULL;
+    if (cdk_gpio_is_reserved(pin, &why)) {
+        cdk_shell_printf(sh, "\033[31mG%d は %s に使われています\033[0m\r\n", pin, why);
+        return 1;
+    }
+
+    if (strcmp(argv[1], "get") == 0) {
+        int level = 0;
+        if (cdk_gpio_get(pin, &level) != ESP_OK) {
+            cdk_shell_printf(sh, "\033[31mG%d を読めません\033[0m\r\n", pin);
+            return 1;
+        }
+        cdk_shell_printf(sh, "G%d = %d\r\n", pin, level);
+        return 0;
+    }
+    if (argc < 4) {
+        cdk_shell_write(sh, "引数が足りません\r\n");
+        return 1;
+    }
+    if (strcmp(argv[1], "mode") == 0) {
+        if (cdk_gpio_mode(pin, argv[3]) != ESP_OK) {
+            cdk_shell_printf(sh, "\033[31mモード '%s' が不正です\033[0m\r\n", argv[3]);
+            return 1;
+        }
+        cdk_shell_printf(sh, "G%d を %s にしました\r\n", pin, argv[3]);
+        return 0;
+    }
+    if (strcmp(argv[1], "set") == 0) {
+        const int level = atoi(argv[3]);
+        if (cdk_gpio_set(pin, level) != ESP_OK) {
+            cdk_shell_printf(sh, "\033[31mG%d に書けません\033[0m\r\n", pin);
+            return 1;
+        }
+        cdk_shell_printf(sh, "G%d = %d\r\n", pin, level ? 1 : 0);
+        return 0;
+    }
+    cdk_shell_write(sh, "mode / set / get のどれかです\r\n");
+    return 1;
+}
+
+static int cmd_adc(int argc, char **argv, void *user)
+{
+    cdk_shell_t *sh = ctx_of(user)->sh;
+
+    if (argc < 3 || strcmp(argv[1], "read") != 0) {
+        cdk_shell_write(sh, "使い方: adc read <ch>   （ADC1 の 0-9）\r\n");
+        return 1;
+    }
+    const int ch = atoi(argv[2]);
+    int raw = 0, mv = -1;
+    const esp_err_t err = cdk_adc_read(ch, &raw, &mv);
+    if (err != ESP_OK) {
+        cdk_shell_printf(sh, "\033[31m読めません: %s\033[0m\r\n", esp_err_to_name(err));
+        return 1;
+    }
+    if (mv >= 0) {
+        cdk_shell_printf(sh, "ADC1 ch%d: raw=%d  %d mV\r\n", ch, raw, mv);
+    } else {
+        cdk_shell_printf(sh, "ADC1 ch%d: raw=%d  (校正なし)\r\n", ch, raw);
+    }
+    return 0;
+}
+
+static int cmd_i2c(int argc, char **argv, void *user)
+{
+    cdk_shell_t *sh = ctx_of(user)->sh;
+
+    if (argc < 2 || strcmp(argv[1], "scan") != 0) {
+        cdk_shell_write(sh, "使い方: i2c scan <sda> <scl>\r\n"
+                            "  内蔵バス (G12/G11) は BSP が使用中なので走査できません。\r\n"
+                            "  Grove ポートに挿したものを見てください。\r\n");
+        return 1;
+    }
+    if (argc < 4) {
+        cdk_shell_write(sh, "sda と scl のピン番号が要ります\r\n");
+        return 1;
+    }
+    const int sda = atoi(argv[2]);
+    const int scl = atoi(argv[3]);
+
+    cdk_shell_printf(sh, "SDA=G%d SCL=G%d を走査中...\r\n", sda, scl);
+    int found = 0;
+    const esp_err_t err = cdk_i2c_scan(sda, scl, 100000, periph_out, sh, &found);
+    if (err == ESP_ERR_INVALID_STATE) {
+        cdk_shell_write(sh,
+                        "\033[31mG11/G12 は内蔵 I2C で、BSP が使用中です\033[0m\r\n"
+                        "外部ポートのピンを指定してください\r\n");
+        return 1;
+    }
+    if (err != ESP_OK) {
+        cdk_shell_printf(sh, "\033[31m走査できません: %s\033[0m\r\n",
+                         esp_err_to_name(err));
+        return 1;
+    }
+    cdk_shell_printf(sh, "%d 個見つかりました\r\n", found);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+
+const cdk_shell_cmd_t APP_COMMANDS[] = {
+    {"help",    "このコマンド一覧",                       cmd_help},
+    {"clear",   "画面を消す",                             cmd_clear},
+    {"echo",    "引数をそのまま出す",                     cmd_echo},
+    {"history", "コマンド履歴",                           cmd_history},
+    {"info",    "機器と接続の状態",                       cmd_info},
+    {"free",    "ヒープの空き",                           cmd_free},
+    {"set",     "設定の表示と変更 (set <key> <value>)",   cmd_set},
+    {"wifi",    "WiFi の状態と接続 (wifi connect)",       cmd_wifi},
+    {"ssh",     "SSH に入る / 切る (ssh close)",          cmd_ssh},
+    {"gpio",    "GPIO の mode / set / get",               cmd_gpio},
+    {"adc",     "ADC1 を読む (adc read <ch>)",            cmd_adc},
+    {"i2c",     "I2C を走査 (i2c scan <sda> <scl>)",      cmd_i2c},
+    {"reboot",  "再起動",                                 cmd_reboot},
+};
+
+const size_t APP_COMMANDS_COUNT = sizeof(APP_COMMANDS) / sizeof(APP_COMMANDS[0]);

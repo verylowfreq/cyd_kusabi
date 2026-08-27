@@ -14,6 +14,8 @@ static const char *t_current = "";
     do {                                                                       \
         t_current = (name);                                                    \
         printf("-- %s\n", t_current);                                          \
+        /* 落ちたときにどこまで進んだか分かるように毎回流す */                 \
+        fflush(stdout);                                                        \
     } while (0)
 
 #define T_CHECK(cond)                                                          \
