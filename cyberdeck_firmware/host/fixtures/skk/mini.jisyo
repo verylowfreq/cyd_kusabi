@@ -1,0 +1,24 @@
+;; テスト用の小さな SKK 辞書。UTF-8。
+;;
+;; 実物の SKK-JISYO.L で試すと、失敗したときに「辞書が悪いのか
+;; 探索が悪いのか」が分からなくなる。ここは全部読める大きさに留める。
+;;
+;; 並びはわざと崩してある。skk_build.py が UTF-8 バイト順に
+;; 並べ直すことを確かめるため。
+;;
+;; 生成:
+;;   python tools/skk_build.py host/fixtures/skk/mini.jisyo \
+;;       --encoding utf-8 -o host/fixtures/skk/mini.skkd
+;;
+;; okuri-ari entries.
+おくr /送/贈/
+たべr /食/
+かえr /帰/変/代;かわる/
+;; okuri-nasi entries.
+にほん /日本/二本/
+かんじ /漢字/感じ/幹事/
+あい /愛/相/藍;植物/
+にほんご /日本語/
+とうきょう /東京/
+さいばーでっき /サイバーデッキ/
+がっこう /学校/

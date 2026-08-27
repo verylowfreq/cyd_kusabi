@@ -60,7 +60,10 @@ endif()
 
 add_library(cdk_testmain INTERFACE)
 target_include_directories(cdk_testmain INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-target_compile_definitions(cdk_testmain INTERFACE CDK_FONT_BLOB_PATH="${CDK_FONT_BLOB}")
+set(CDK_SKK_DICT ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/skk/mini.skkd)
+target_compile_definitions(cdk_testmain INTERFACE
+    CDK_FONT_BLOB_PATH="${CDK_FONT_BLOB}"
+    CDK_SKK_DICT_PATH="${CDK_SKK_DICT}")
 
 set(CDK_TESTS
     test_proto
@@ -73,6 +76,7 @@ set(CDK_TESTS
     test_shell
     test_screen
     test_skk_romkana
+    test_skk_dict
 )
 
 foreach(t ${CDK_TESTS})
@@ -100,9 +104,31 @@ add_test(NAME no_idf_in_core
                  -DCORE_DIR=${CDK_CORE_DIR}
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_no_idf.cmake)
 
+# 辞書の形式はビルダとリーダの両方に書いてある。片方だけ直すと、
+# コミット済みの fixture では通り続けて実物の辞書だけが壊れる。
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    add_test(NAME skk_fixture_reproducible
+             COMMAND ${CMAKE_COMMAND}
+                     -DPY=${Python3_EXECUTABLE}
+                     -DJISYO=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/skk/mini.jisyo
+                     -DBIN=${CDK_SKK_DICT}
+                     -DBUILDER=${CMAKE_CURRENT_SOURCE_DIR}/../tools/skk_build.py
+                     -DTMP=${CMAKE_CURRENT_BINARY_DIR}/mini_regen.skkd
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_skk_fixture.cmake)
+else()
+    message(STATUS "Python が見つからないので skk_fixture_reproducible は作りません")
+endif()
+
 # --- 参照レンダラ ---
 # 実機のスクリーンショットと突き合わせるための基準画像を吐く。
 # `tools/cdk.py shot --verify` がこれを呼ぶ。
 add_executable(cdk_render tools/cdk_render.c)
 target_link_libraries(cdk_render PRIVATE cdk_core)
 target_compile_definitions(cdk_render PRIVATE CDK_FONT_BLOB_PATH="${CDK_FONT_BLOB}")
+
+# --- 辞書の探索ツール ---
+# 実物の SKK-JISYO.L を実機と同じコードで引く。fixture の 10 件では
+# 索引の並べ直しの誤りが表に出ないので、17 万件で別実装と突き合わせる。
+add_executable(skk_probe tools/skk_probe.c)
+target_link_libraries(skk_probe PRIVATE cdk_core)
