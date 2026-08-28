@@ -58,8 +58,14 @@
 #define CDK_BOARD_LCD_WIDTH  480
 #define CDK_BOARD_LCD_HEIGHT 320
 
-/* ---- LCD (SPI2 = FSPI の IO_MUX ピン。GPIO マトリクスを通らないので 80MHz 可) ---- */
-#define CDK_BOARD_LCD_SPI_HOST 2 /* SPI2_HOST */
+/* ---- LCD (SPI2 = FSPI の IO_MUX ピン。GPIO マトリクスを通らないので 80MHz 可) ----
+ *
+ * **ホストは列挙子の名前で書く。** spi_host_device_t は
+ * SPI1_HOST=0 / SPI2_HOST=1 / SPI3_HOST=2 で、**周辺機能の番号と 1 つずれる**。
+ * 「SPI2 だから 2」と書くと SPI3 に載る。LCD は初期化まで通ってしまい、
+ * IO_MUX 直結を失って GPIO マトリクス経由になっていることに気づけない
+ * （実機の初火入れで踏んだ）。 */
+#define CDK_BOARD_LCD_SPI_HOST SPI2_HOST
 #define CDK_BOARD_LCD_BL       8
 #define CDK_BOARD_LCD_DC       9
 #define CDK_BOARD_LCD_CS      10
@@ -69,7 +75,7 @@
 #define CDK_BOARD_LCD_RST     14
 
 /* ---- microSD (SPI3。LCD とは別バス) ---- */
-#define CDK_BOARD_SD_SPI_HOST 3 /* SPI3_HOST */
+#define CDK_BOARD_SD_SPI_HOST SPI3_HOST
 #define CDK_BOARD_SD_MISO    39
 #define CDK_BOARD_SD_MOSI    40
 #define CDK_BOARD_SD_CS      41

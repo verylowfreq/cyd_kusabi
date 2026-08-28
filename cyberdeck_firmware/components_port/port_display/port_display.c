@@ -10,6 +10,7 @@
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_lcd_ili9488.h"
+#include "hal/spi_types.h"
 #include "esp_lcd_panel_commands.h"
 #include "esp_lcd_panel_io.h"
 #endif
@@ -156,9 +157,13 @@ static esp_err_t board_panel_init(void)
 
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel), TAG, "reset");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), TAG, "init");
-    /* ILI9488 の素の向きは 320x480（縦）。横長で使うので入れ替える。 */
+    /* ILI9488 の素の向きは 320x480（縦）。横長で使うので入れ替える。
+     *
+     * mirror の 2 つは実機で決めた。最初 (true, false) にしたら 180 度
+     * 回った絵が出た（初期化も転送も正しく、向きだけが違う）。
+     * ここは論理では決まらないので、パネルを見て合わせるしかない。 */
     ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(s_panel, true), TAG, "swap_xy");
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_panel, true, false), TAG, "mirror");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_panel, false, true), TAG, "mirror");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "disp_on");
 
     ESP_RETURN_ON_ERROR(backlight_init(), TAG, "backlight_init");

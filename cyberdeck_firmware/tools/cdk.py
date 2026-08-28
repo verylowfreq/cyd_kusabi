@@ -61,6 +61,9 @@ IDF_PATH = Path(os.environ.get("IDF_PATH", r"C:\DATA-0\Espressif\esp-idf-v5.5.5"
 DEFAULT_CTRL = os.environ.get("CDK_CTRL", "COM22")
 DEFAULT_LOG = os.environ.get("CDK_LOG", "COM75")
 LOG_BAUD = 115200
+# 制御チャネルの速度。CoreS3 の USB-Serial-JTAG は速度の概念が無いので
+# 何でも通る。v1 は専用 UART なので実際に効く（port_link.c と合わせること）。
+CTRL_BAUD = int(os.environ.get("CDK_CTRL_BAUD", "921600"))
 
 READY_SENTINEL = "#CDK-READY"
 
@@ -217,7 +220,9 @@ def read_until(
 
 class Ctrl:
     def __init__(self, portname: str) -> None:
-        self.port = open_port(portname, baud=115200, timeout=0.05)
+        # v1 の制御チャネルは専用 UART で 921600。CoreS3 の USB-Serial-JTAG は
+        # 速度の概念が無いので、どちらでも通る値にしておく。
+        self.port = open_port(portname, baud=CTRL_BAUD, timeout=0.05)
         self.parser = FrameParser()
         self.queue: list[tuple[int, bytes]] = []
 
@@ -306,7 +311,7 @@ def cmd_log(args) -> int:
 
 def cmd_boot(args) -> int:
     log = open_port(args.log, LOG_BAUD, timeout=0.1)
-    ctrl = open_port(args.ctrl, 115200, timeout=0.05)
+    ctrl = open_port(args.ctrl, CTRL_BAUD, timeout=0.05)
     try:
         log.reset_input_buffer()
         hard_reset(ctrl)
