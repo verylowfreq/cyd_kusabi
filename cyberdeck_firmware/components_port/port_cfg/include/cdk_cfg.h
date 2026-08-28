@@ -30,6 +30,9 @@ extern "C" {
 /* 文字の拡大率。"1" か "2"。展示など離れて見るときに 2。
  * **変えたら再起動が要る**（桁数と行数が変わるため）。 */
 #define CDK_CFG_FONTSCALE "fontscale"
+/* 最下段のステータス帯。"on" か "off"。本文が 1 行減る。
+ * **変えたら再起動が要る**（fontscale と同じ理由）。 */
+#define CDK_CFG_STATUSBAR "statusbar"
 
 /* NVS を初期化する。何度呼んでもよい。 */
 esp_err_t cdk_cfg_init(void);

@@ -27,6 +27,7 @@
 #include "cdk_shell.h"
 #include "cdk_skk.h"
 #include "cdk_skkdict_src.h"
+#include "cdk_status.h"
 #include "cdk_storage.h"
 #include "cdk_usbhid.h"
 #include "esp_timer.h"
@@ -73,6 +74,15 @@ static cdk_screen_t       s_screen;
 static cdk_term_t         s_term;
 static void              *s_termmem;
 static bool               s_dirty;
+
+/* ---- ステータス帯 ----
+ * 帯を出すか。**再起動が要る**（端末の行数が変わるため）。 */
+static bool     s_statusbar;
+/* 帯を描く行。端末グリッドの 1 つ下（グリッドの外）。 */
+static int      s_status_row;
+static char     s_status_last[160];
+/* SD の容量。マウント時に 1 回だけ取る（帯の描画で毎回問い合わせない）。 */
+static uint32_t s_sd_mb;
 
 static cdk_shell_t        s_shell;
 static cdk_keys_decoder_t s_keydec;
@@ -279,7 +289,14 @@ static void send_screenshot(void)
         .format = CDK_PIXFMT_RGB565_LE,
         .gamma_x10 = s_screen.gamma_x10,
         .scale = s_screen.scale,
-        .reserved = {0},
+        /* **本文が終わる位置から下ぜんぶ。** 帯 1 行だけでなく、
+         * 端数の 8px も含める（480x320 は 12行x24px = 288 で、
+         * 残り 32px が帯 24 + 端数 8）。ここを帯の高さだけにすると
+         * 端数の 8px が比較に残り、本文だけを比べているつもりで
+         * 帯の一部を比べてしまう。 */
+        .status_h = (uint8_t)(s_statusbar
+                                  ? (s_canvas.h - s_term.rows * cdk_screen_cell_h(&s_screen))
+                                  : 0),
         .byte_len = (uint32_t)cdk_canvas_bytes(s_canvas.w, s_canvas.h),
     };
 
@@ -366,6 +383,83 @@ static void term_printf(const char *fmt, ...)
     cdk_term_feed(&s_term, buf, (size_t)n);
     cdk_screen_draw(&s_screen, &s_canvas, &s_term, false);
     (void)cdk_display_flush(&s_canvas);
+}
+
+/* ------------------------------------------------------------------ */
+/* ステータス帯                                                        */
+/* ------------------------------------------------------------------ */
+
+/* 端末グリッドの外に、main が直接描く。
+ *
+ * **DECSTBM で最下行を確保する手は使えない。** vi も less も top も自分で
+ * スクロール領域を設定するか ESC[r で解除して全画面を使うので、SSH 先で
+ * それらを動かした瞬間に上書きされる。グリッドの外に置けば触られない。 */
+static void draw_status(bool force)
+{
+    if (!s_statusbar) {
+        return;
+    }
+
+    char ip[20];
+    cdk_wifi_ip(ip, sizeof(ip));
+
+    cdk_status_t st;
+    memset(&st, 0, sizeof(st));
+    st.wifi_up = cdk_wifi_is_connected();
+    st.ip = ip;
+    st.sd_ok = cdk_sd_mounted();
+    st.sd_mb = s_sd_mb;
+    st.ime = cdk_skk_mode_label(&s_skk);
+    st.kbd = cdk_usbhid_connected();
+    st.ssh_up = cdk_ssh_is_open();
+
+    char line[160];
+    cdk_status_format(&st, s_term.cols, line, sizeof(line));
+
+    /* 変わっていなければ描き直さない。毎周描くと帯のぶんだけ
+     * 転送が増え続ける（ダーティ行に入りっぱなしになる）。 */
+    if (!force && strcmp(line, s_status_last) == 0) {
+        return;
+    }
+    strncpy(s_status_last, line, sizeof(s_status_last) - 1);
+    s_status_last[sizeof(s_status_last) - 1] = '\0';
+
+    cdk_cell_t cell;
+    memset(&cell, 0, sizeof(cell));
+    cell.fg = CDK_COLOR_IDX(15); /* 白 */
+    cell.bg = CDK_COLOR_IDX(4);  /* 青 */
+
+    const size_t n = strlen(line);
+    size_t       i = 0;
+    int          col = 0;
+    while (col < s_term.cols) {
+        uint32_t cp = (uint32_t)' ';
+        int      w = 1;
+        if (i < n) {
+            bool         ok = false;
+            const size_t used = cdk_utf8_decode((const uint8_t *)line + i, n - i, &cp,
+                                                &ok);
+            if (used == 0) {
+                break;
+            }
+            i += used;
+            if (!ok) {
+                cp = (uint32_t)' ';
+            }
+            w = cdk_char_width(cp);
+            if (w <= 0) {
+                continue;
+            }
+        }
+        if (col + w > s_term.cols) {
+            break; /* 全角が右端をまたぐ。空白のままにする */
+        }
+        cell.cp = (cp == (uint32_t)' ') ? 0u : cp;
+        cell.attr = (w == 2) ? CDK_ATTR_WIDE_LEAD : 0u;
+        cdk_screen_draw_cell(&s_screen, &s_canvas, &cell, col, s_status_row, false);
+        col += w;
+    }
+    s_dirty = true;
 }
 
 static void draw_banner(void)
@@ -631,12 +725,27 @@ void app_main(void)
             }
         }
         cdk_screen_set_scale(&s_screen, (uint8_t)v);
+
+        /* ステータス帯も**端末を作る前に**決める。1 行使うので行数が変わる。 */
+        char sb[8];
+        if (cdk_cfg_get(CDK_CFG_STATUSBAR, sb, sizeof(sb)) == ESP_OK) {
+            s_statusbar = (strcmp(sb, "on") == 0);
+        }
     }
 
     cdk_canvas_clear(&s_canvas, s_screen.default_bg);
 
     const int cols = cdk_screen_cols(&s_screen, s_disp.width);
-    const int rows = cdk_screen_rows(&s_screen, s_disp.height);
+    const int all_rows = cdk_screen_rows(&s_screen, s_disp.height);
+
+    /* **帯は端末グリッドの外。** 端末には 1 行少なく渡し、その 1 行ぶんの
+     * 場所へ main が直接描く。§0 は「余りの 8px を帯に使う」と書いているが、
+     * 8px に 12px のフォントは入らない。専用の小さいフォントを作る手もあるが、
+     * 2 倍表示のとき帯だけ極小になって展示では読めない。1 行使えば
+     * 拡大率にそのまま追随する（DESIGN.md の該当節に理由を書いた）。 */
+    const int rows = s_statusbar ? (all_rows - 1) : all_rows;
+    s_status_row = all_rows - 1;
+
     const size_t tmem = cdk_term_mem_size(cols, rows);
     s_termmem = heap_caps_malloc(tmem, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_termmem == NULL || !cdk_term_init(&s_term, cols, rows, s_termmem, tmem)) {
@@ -663,6 +772,7 @@ void app_main(void)
     ESP_LOGI(TAG, "ガンマ補正 %u/10", (unsigned)s_screen.gamma_x10);
 
     draw_banner();
+    draw_status(true);
     cdk_screen_draw(&s_screen, &s_canvas, &s_term, true);
     ESP_ERROR_CHECK(cdk_display_flush(&s_canvas));
     s_dirty = false;
@@ -719,8 +829,9 @@ void app_main(void)
         char     name[24] = {0};
         uint64_t cap = 0;
         cdk_sd_info(name, sizeof(name), &cap, NULL);
-        term_printf("sd    : \033[32m%s %lluMB\033[0m\r\n", name,
-                    (unsigned long long)(cap / (1024ULL * 1024ULL)));
+        s_sd_mb = (uint32_t)(cap / (1024ULL * 1024ULL));
+        term_printf("sd    : \033[32m%s %luMB\033[0m\r\n", name,
+                    (unsigned long)s_sd_mb);
     } else {
         term_printf("\033[33msd    : 見つかりません\033[0m\r\n");
     }
@@ -802,6 +913,9 @@ void app_main(void)
                 }
             }
         }
+
+        /* ステータス帯。内容が変わったときだけ描き直す。 */
+        draw_status(false);
 
         if (s_dirty) {
             /* 端末のダーティ行だけをキャンバスへ、

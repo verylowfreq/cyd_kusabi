@@ -421,11 +421,13 @@ def cmd_shot(args) -> int:
         if info is None:
             print("[cdk] SHOT_INFO が返りません", file=sys.stderr)
             return 1
-        width, height, fmt, gamma_x10, scale, _r0, byte_len = struct.unpack(
+        width, height, fmt, gamma_x10, scale, status_h, byte_len = struct.unpack(
             "<HHBBBBI", info[1])
         note = "" if gamma_x10 in (0, 10) else f" gamma={gamma_x10 / 10:.1f}"
         if scale > 1:
             note += f" x{scale}"
+        if status_h:
+            note += f" 帯{status_h}px"
         print(f"[cdk] {width}x{height} fmt={fmt} {byte_len} バイト{note}")
 
         buf = bytearray(byte_len)
@@ -467,14 +469,15 @@ def cmd_shot(args) -> int:
     if args.verify or args.verify_vt:
         return verify_against_reference(raw, width, height, out, args.verify_vt,
                                         getattr(args, "preedit", None),
-                                        gamma_x10, scale)
+                                        gamma_x10, scale, status_h)
     return 0
 
 
 def verify_against_reference(raw: bytes, width: int, height: int, png_path: Path,
                              vt_file: str | None = None,
                              preedit_file: str | None = None,
-                             gamma_x10: int = 10, scale: int = 1) -> int:
+                             gamma_x10: int = 10, scale: int = 1,
+                             status_h: int = 0) -> int:
     """ホスト側で同じ内容を描いてバイト単位で比較する。
 
     実機と PC で同じ純 C コードを動かしているので、一致しないなら
@@ -514,7 +517,8 @@ def verify_against_reference(raw: bytes, width: int, height: int, png_path: Path
 
     if vt_file:
         ref_path = HOST_BUILD_DIR / f"ref_vt_{width}x{height}.raw"
-        cmd = [str(exe), f"--gamma={gamma_x10}", f"--scale={scale}", "vt",
+        cmd = [str(exe), f"--gamma={gamma_x10}", f"--scale={scale}",
+               f"--status-h={status_h}", "vt",
                str(vt_file), str(width), str(height), str(ref_path)]
         if preedit_file:
             # 未確定文字列は引数ではなくファイルで渡す。Windows の argv は
@@ -523,20 +527,32 @@ def verify_against_reference(raw: bytes, width: int, height: int, png_path: Path
     else:
         ref_path = HOST_BUILD_DIR / f"ref_{width}x{height}.raw"
         cmd = [str(exe), f"--gamma={gamma_x10}", f"--scale={scale}",
-               "testpattern", str(width), str(height), str(ref_path)]
+               f"--status-h={status_h}", "testpattern",
+               str(width), str(height), str(ref_path)]
     subprocess.run(cmd, check=True)
     ref = ref_path.read_bytes()
 
     if len(ref) != len(raw):
         print(f"[cdk] サイズ不一致 実機={len(raw)} 基準={len(ref)}", file=sys.stderr)
         return 1
-    if ref == raw:
+
+    # **比べるのは本文だけ。** ステータス帯は IP や電池電圧を出すので、
+    # ホスト側では再現できない。ここを比べると必ず食い違う。
+    # 「検証中は帯を描かない」という分岐を実機に入れる手もあるが、
+    # それは検証されているときだけ挙動が違う装置になり、#26 と同じ穴になる。
+    cmp_h = height - status_h
+    keep = cmp_h * width * 2
+    ref_cmp, raw_cmp = ref[:keep], raw[:keep]
+
+    if ref_cmp == raw_cmp:
         what = f"vt:{Path(vt_file).name}" if vt_file else "testpattern"
-        print(f"[cdk] 検証 OK: 基準画像と完全一致 ({width}x{height}, {what})")
+        area = f"{width}x{cmp_h}" if status_h else f"{width}x{height}"
+        note = "（本文のみ。帯は実機だけの内容なので比べない）" if status_h else ""
+        print(f"[cdk] 検証 OK: 基準画像と完全一致 ({area}, {what}){note}")
         return 0
 
-    diff = sum(1 for a, b in zip(ref, raw) if a != b)
-    first = next(i for i, (a, b) in enumerate(zip(ref, raw)) if a != b)
+    diff = sum(1 for a, b in zip(ref_cmp, raw_cmp) if a != b)
+    first = next(i for i, (a, b) in enumerate(zip(ref_cmp, raw_cmp)) if a != b)
     px = first // 2
     print(
         f"[cdk] 検証 NG: {diff} バイト違う。最初の差分は "

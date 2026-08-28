@@ -74,7 +74,11 @@ typedef struct {
      * 基準レンダラが同じ倍率で描かないと `shot --verify` が落ち、
      * しかも「実機が壊れた」ように見える。 */
     uint8_t  scale;
-    uint8_t  reserved[1];
+    /* ステータス帯の高さ（画素）。0 なら帯なし。
+     * **`shot --verify` の比較を本文だけに限るために要る。**
+     * 帯の中身（IP や電池）はホスト側で再現できないので、
+     * そこを比べると必ず食い違う。 */
+    uint8_t  status_h;
     uint32_t byte_len;
 } cdk_wire_shot_info_t;
 

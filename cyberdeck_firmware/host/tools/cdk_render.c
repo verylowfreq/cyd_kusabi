@@ -99,6 +99,7 @@ static int render_testpattern(int w, int h, const char *out)
 
 static uint8_t g_gamma_x10 = 10; /* 10 = 無補正 */
 static uint8_t g_scale = 1;      /* 文字の拡大率 */
+static int     g_status_h = 0;   /* ステータス帯の高さ（画素） */
 
 static int render_vt(const char *in_path, int w, int h, const char *out,
                      const char *preedit_path)
@@ -147,7 +148,10 @@ static int render_vt(const char *in_path, int w, int h, const char *out,
     }
 
     const int cols = cdk_screen_cols(&screen, w);
-    const int rows = cdk_screen_rows(&screen, h);
+    /* **実機と同じ行数にする。** 実機は帯のぶん 1 行少ない端末を作って
+     * いるので、ここが 1 行多いと折り返しとスクロールがずれ、
+     * 本文だけを比べても食い違う。 */
+    const int rows = cdk_screen_rows(&screen, h - g_status_h);
     if (cols <= 0 || rows <= 0) {
         fprintf(stderr, "cdk_render: 画面が小さすぎます\n");
         free(in);
@@ -199,6 +203,8 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--scale=", 8) == 0) {
             g_scale = (uint8_t)atoi(argv[i] + 8);
+        } else if (strncmp(argv[i], "--status-h=", 11) == 0) {
+            g_status_h = atoi(argv[i] + 11);
         } else if (strncmp(argv[i], "--gamma=", 8) == 0) {
             g_gamma_x10 = (uint8_t)atoi(argv[i] + 8);
         } else {
