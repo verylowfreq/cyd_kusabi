@@ -38,6 +38,9 @@
 /* 制御チャネルは USB-Serial-JTAG。ログは UART1 → FT232。 */
 #define CDK_BOARD_LINK_IS_USB_SERIAL_JTAG 1
 
+/* パネルの上端は全部見えている。ずらす必要は無い。 */
+#define CDK_BOARD_LCD_Y_OFFSET 0
+
 #elif defined(CONFIG_CDK_BOARD_V1)
 
 #define CDK_BOARD_NAME "cyberdeck v1"
@@ -57,6 +60,18 @@
 /* ---- 画面 ---- */
 #define CDK_BOARD_LCD_WIDTH  480
 #define CDK_BOARD_LCD_HEIGHT 320
+
+/* **このパネルは一番上の 1 行が見えない。** キャンバスの行 y を
+ * パネルの行 y + 1 に出して、見える範囲へ押し下げる。
+ *
+ * ずらした分、キャンバスの一番下の 1 行はパネルの外に出るので送らない
+ * （port_display.c の flush で落としている）。下端の 8 行はステータス帯
+ * （DESIGN.md §0）なので、欠けるのはその最下段 1 行だけ。
+ *
+ * **キャンバス側は 480x320 のまま**にしてある。ずれはパネルの性質であって
+ * 描く内容の性質ではないし、`shot --verify` がキャンバスを見ている以上、
+ * ここを変えるとホストとの一致検証まで巻き添えになる。 */
+#define CDK_BOARD_LCD_Y_OFFSET 1
 
 /* ---- LCD (SPI2 = FSPI の IO_MUX ピン。GPIO マトリクスを通らないので 80MHz 可) ----
  *

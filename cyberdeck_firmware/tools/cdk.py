@@ -480,6 +480,23 @@ def verify_against_reference(raw: bytes, width: int, height: int, png_path: Path
     exe = HOST_BUILD_DIR / "cdk_render.exe"
     if not exe.exists():
         exe = HOST_BUILD_DIR / "cdk_render"
+
+    # **比べる前にホスト側を建て直す。**
+    # 基準画像は純 C のコードから生成しているので、components/ を直したのに
+    # ここが古いままだと、実機とホストで違うコードを比べることになる。
+    # そのとき出るのは「検証 NG」なので、**直した本人が「実機が壊れた」と
+    # 読み違える**（実際にこれで一度足を止めた）。
+    #
+    # なお `ctest --test-dir build-host` は建て直さない。古いバイナリのまま
+    # 「18/18 通った」と出るので、ctest だけを根拠にしないこと。
+    if (HOST_BUILD_DIR / "build.ninja").exists():
+        r = subprocess.run(["ninja", "-C", str(HOST_BUILD_DIR)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print("[cdk] ホスト側のビルドに失敗しました:\n" + (r.stderr or r.stdout),
+                  file=sys.stderr)
+            return 1
+
     if not exe.exists():
         print(
             "[cdk] 基準レンダラがありません。先にホスト側をビルドしてください:\n"

@@ -36,7 +36,17 @@ void cdk_screen_init(cdk_screen_t *s, const cdk_font_t *font)
         s->palette[232 + i] = cdk_rgb565(v, v, v);
     }
 
-    s->default_fg = s->palette[7];
+    /* 地の文は純白 (palette[15])。xterm の既定は palette[7] = 0xE5E5E5 で、
+     * これは白ではなく 90% の灰色。実機の ILI9488 だと灰色にしか見えず、
+     * 「白がやたらに暗い」と感じる原因になっていた。
+     *
+     * パレット自体は xterm 標準のまま触っていないので、**明示的な SGR 37 は
+     * 今も 0xE5E5E5**。37 と 97（明るい白）の区別も残る。
+     *
+     * なお純白はこのパネルで出せる上限で、ドライバの RGB565→RGB666 変換は
+     * 0xFFFF を 63/63/63 に写す（変換で落ちてはいない）。バックライトも
+     * 起動時から 100%。これ以上明るくする余地はファーム側には無い。 */
+    s->default_fg = s->palette[15];
     s->default_bg = s->palette[0];
 }
 

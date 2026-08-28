@@ -272,6 +272,21 @@ esp_err_t cdk_display_flush(cdk_canvas_t *canvas)
         return ESP_OK;
     }
 
+    /* パネルの上端 CDK_BOARD_LCD_Y_OFFSET 行が見えない基板では、その分だけ
+     * 下へずらして描く。キャンバスの行 y はパネルの行 y + OFFSET に出るので、
+     * 送れる最後のキャンバス行は s_height - 1 - OFFSET。
+     * これを超えるとパネルの行数を超えたアドレスを投げることになる。 */
+    if (y1 > s_height - CDK_BOARD_LCD_Y_OFFSET) {
+        y1 = s_height - CDK_BOARD_LCD_Y_OFFSET;
+    }
+    if (y0 >= y1) {
+        /* 落とした行だけがダーティだった場合。**ここで必ずダーティを消す。**
+         * 消さずに帰ると永久にダーティのままになり、以降の flush が毎回
+         * ここまで来て何もせずに戻る（画面は正しいので気づけない）。 */
+        cdk_canvas_dirty_clear(canvas);
+        return ESP_OK;
+    }
+
     /* 転送のあいだ G35 を DC（出力）にしておく。SD が入力にしたままだと
      * DC が動かず、コマンドとデータの区別がつかなくなって画面が壊れる。 */
     cdk_spibus_acquire(CDK_SPIBUS_LCD);
@@ -303,8 +318,9 @@ esp_err_t cdk_display_flush(cdk_canvas_t *canvas)
          * キャンバスの中を直接指す。 */
         const void *payload = src;
 #endif
-        const esp_err_t err =
-            esp_lcd_panel_draw_bitmap(s_panel, 0, y, s_width, y + rows, payload);
+        const esp_err_t err = esp_lcd_panel_draw_bitmap(
+            s_panel, 0, y + CDK_BOARD_LCD_Y_OFFSET, s_width,
+            y + rows + CDK_BOARD_LCD_Y_OFFSET, payload);
         if (err != ESP_OK) {
             cdk_spibus_release();
             ESP_LOGE(TAG, "draw_bitmap に失敗 %s", esp_err_to_name(err));
