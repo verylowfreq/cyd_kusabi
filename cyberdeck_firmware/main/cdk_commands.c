@@ -180,6 +180,9 @@ static int cmd_set(int argc, char **argv, void *user)
     if (strcmp(argv[1], CDK_CFG_GAMMA) == 0) {
         cdk_apply_gamma_setting();
     }
+    if (strcmp(argv[1], CDK_CFG_KEYMAP) == 0) {
+        cdk_apply_keymap_setting();
+    }
     return 0;
 }
 

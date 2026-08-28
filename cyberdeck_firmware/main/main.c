@@ -28,6 +28,8 @@
 #include "cdk_skk.h"
 #include "cdk_skkdict_src.h"
 #include "cdk_storage.h"
+#include "cdk_usbhid.h"
+#include "esp_timer.h"
 #include "cdk_term.h"
 
 #include "esp_heap_caps.h"
@@ -426,6 +428,26 @@ void cdk_apply_gamma_setting(void)
     cdk_canvas_mark_all_dirty(&s_canvas);
 }
 
+void cdk_apply_keymap_setting(void)
+{
+#if CDK_BOARD_HAS_USB_HOST
+    char buf[16];
+    bool jis = false;
+
+    /* ガンマと同じ理由でここでも NVS を開ける（不具合 #38）。 */
+    if (cdk_cfg_init() == ESP_OK &&
+        cdk_cfg_get(CDK_CFG_KEYMAP, buf, sizeof(buf)) == ESP_OK && buf[0] != '\0') {
+        jis = (strcmp(buf, "jis") == 0);
+        if (!jis && strcmp(buf, "us") != 0) {
+            ESP_LOGW(TAG, "keymap=%s は us / jis のどちらでもありません。us を使います",
+                     buf);
+        }
+    }
+    cdk_usbhid_set_layout(jis);
+    ESP_LOGI(TAG, "キー配列 %s", jis ? "JIS" : "US");
+#endif
+}
+
 static void load_config(void)
 {
     if (cdk_cfg_init() != ESP_OK) {
@@ -596,6 +618,17 @@ void app_main(void)
     /* **端末を作ったあとで呼ぶ。** 中で s_term をダーティにするので、
      * cdk_term_init より前だと未初期化の領域を触ることになる。 */
     cdk_apply_gamma_setting();
+
+#if CDK_BOARD_HAS_USB_HOST
+    /* USB キーボード。挿さっていなくても失敗しない（接続は非同期）。 */
+    {
+        const esp_err_t err = cdk_usbhid_init();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "USB ホストを起動できません: %s", esp_err_to_name(err));
+        }
+    }
+    cdk_apply_keymap_setting();
+#endif
     ESP_LOGI(TAG, "ガンマ補正 %u/10", (unsigned)s_screen.gamma_x10);
 
     draw_banner();
@@ -703,6 +736,13 @@ void app_main(void)
 
     while (true) {
         cdk_link_poll(5);
+
+#if CDK_BOARD_HAS_USB_HOST
+        /* USB キーボード。**route_key はここ（メインループ）からしか呼ばない。**
+         * 端末・画面・SKK・SSH を触るので、USB のタスクから直接呼ぶと壊れる。 */
+        cdk_usbhid_poll(route_key, NULL,
+                        (uint32_t)(esp_timer_get_time() / 1000));
+#endif
 
         /* SSH の受信をそのまま端末へ流す。DESIGN.md §8.2 の通り
          * 専用タスクは作らず、メインループが両方を見る。 */

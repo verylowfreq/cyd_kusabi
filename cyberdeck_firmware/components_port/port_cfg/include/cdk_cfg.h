@@ -25,6 +25,8 @@ extern "C" {
 /* パネルのガンマ補正。10 倍の整数を 10 進文字列で持つ（"18" なら 1.8）。
  * 未設定なら基板の既定値 CDK_BOARD_LCD_GAMMA_X10 を使う。 */
 #define CDK_CFG_GAMMA     "gamma"
+/* キー配列。"us" か "jis"（DESIGN.md 7.4）。未設定なら us。 */
+#define CDK_CFG_KEYMAP    "keymap"
 
 /* NVS を初期化する。何度呼んでもよい。 */
 esp_err_t cdk_cfg_init(void);

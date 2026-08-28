@@ -24,6 +24,7 @@ set(CDK_CORE_MODULES
     cdk_font
     cdk_term
     cdk_keys
+    cdk_hid
     cdk_shell
     cdk_screen
     cdk_skk
@@ -74,6 +75,7 @@ set(CDK_TESTS
     test_term
     test_keys
     test_keys_decode
+    test_hid
     test_shell
     test_screen
     test_skk_romkana

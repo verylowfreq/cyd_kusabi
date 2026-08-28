@@ -1,0 +1,8 @@
+dependencies:
+  # USB HID クラスドライバ。**ブートプロトコル**（8 バイト固定レポート）で使う。
+  # レポートディスクリプタの解析はしない: キーボードなら全機種が
+  # ブートプロトコルを持っていて、その 8 バイトは
+  # (modifier, reserved, keycode x6) と決まっており、
+  # keycode がそのまま cdk_keycode_t（HID usage id）と同じ値になる。
+  espressif/usb_host_hid:
+    version: "^1.0.0"
