@@ -22,6 +22,9 @@ extern "C" {
 #define CDK_CFG_SSH_HOST  "ssh.host"
 #define CDK_CFG_SSH_USER  "ssh.user"
 #define CDK_CFG_SSH_PASS  "ssh.pass"
+/* パネルのガンマ補正。10 倍の整数を 10 進文字列で持つ（"18" なら 1.8）。
+ * 未設定なら基板の既定値 CDK_BOARD_LCD_GAMMA_X10 を使う。 */
+#define CDK_CFG_GAMMA     "gamma"
 
 /* NVS を初期化する。何度呼んでもよい。 */
 esp_err_t cdk_cfg_init(void);

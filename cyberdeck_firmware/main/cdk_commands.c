@@ -174,6 +174,12 @@ static int cmd_set(int argc, char **argv, void *user)
         return 1;
     }
     cdk_shell_printf(sh, "%s を設定しました\r\n", argv[1]);
+
+    /* ガンマだけはその場で反映する。パネルの明るさは目で決めるしかないので、
+     * 焼き直しや再起動を挟むと追い込めない。 */
+    if (strcmp(argv[1], CDK_CFG_GAMMA) == 0) {
+        cdk_apply_gamma_setting();
+    }
     return 0;
 }
 

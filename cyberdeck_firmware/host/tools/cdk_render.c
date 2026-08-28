@@ -97,6 +97,8 @@ static int render_testpattern(int w, int h, const char *out)
     return rc;
 }
 
+static uint8_t g_gamma_x10 = 10; /* 10 = 無補正 */
+
 static int render_vt(const char *in_path, int w, int h, const char *out,
                      const char *preedit_path)
 {
@@ -123,6 +125,7 @@ static int render_vt(const char *in_path, int w, int h, const char *out,
 
     cdk_screen_t screen;
     cdk_screen_init(&screen, &font);
+    cdk_screen_set_gamma(&screen, g_gamma_x10);
 
     if (preedit_path != NULL) {
         size_t   pre_len = 0;
@@ -185,6 +188,23 @@ static int render_vt(const char *in_path, int w, int h, const char *out,
 
 int main(int argc, char **argv)
 {
+    /* --gamma=N を先に抜き取る。位置引数の並びを崩さないため。
+     *
+     * **実機が掛けているガンマと同じ値でここも描かないと `shot --verify` が
+     * 落ちる。** ガンマはパネルに合わせて実機側で変えられるようにしてあるので、
+     * 基準画像もその値に追随しないと「実機が壊れた」ように見える。
+     * cdk.py が SHOT_INFO で受け取った値をそのまま渡している。 */
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--gamma=", 8) == 0) {
+            g_gamma_x10 = (uint8_t)atoi(argv[i] + 8);
+            for (int k = i; k < argc - 1; k++) {
+                argv[k] = argv[k + 1];
+            }
+            argc--;
+            i--;
+        }
+    }
+
     if (argc < 2) {
         return usage();
     }

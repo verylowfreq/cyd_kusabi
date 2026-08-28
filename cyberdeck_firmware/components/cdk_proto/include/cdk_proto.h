@@ -65,7 +65,12 @@ typedef struct {
     uint16_t width;
     uint16_t height;
     uint8_t  format; /* CDK_PIXFMT_* */
-    uint8_t  reserved[3];
+    /* 実機が掛けているガンマ補正（10 倍の整数、10 = 無補正）。
+     * **ホストの基準レンダラに同じ値を渡すために要る。** これが無いと、
+     * `set gamma` で実機を追い込んだ瞬間に `shot --verify` が
+     * 「実機が壊れた」ように落ちる。落ちる理由はガンマ違いなので紛らわしい。 */
+    uint8_t  gamma_x10;
+    uint8_t  reserved[2];
     uint32_t byte_len;
 } cdk_wire_shot_info_t;
 

@@ -337,6 +337,101 @@ int main(void)
         T_CHECK(((unsigned char)p[0] & 0xC0u) != 0x80u);
     }
 
+    T_CASE("ガンマ補正");
+    {
+        /* 1.0 以下は恒等。描画側が分岐しなくて済むことの担保。 */
+        cdk_screen_set_gamma(&S, 10);
+        for (int i = 0; i < 32; i++) {
+            T_EQ_INT(S.lut5[i], i);
+        }
+        for (int i = 0; i < 64; i++) {
+            T_EQ_INT(S.lut6[i], i);
+        }
+
+        cdk_screen_set_gamma(&S, 18);
+        /* **両端は動かない。** 黒が浮くと背景が灰色になり、
+         * 白が下がると地の文が暗くなる。どちらも起きてはいけない。 */
+        T_EQ_INT(S.lut5[0], 0);
+        T_EQ_INT(S.lut5[31], 31);
+        T_EQ_INT(S.lut6[0], 0);
+        T_EQ_INT(S.lut6[63], 63);
+
+        /* 単調非減少。ここが崩れると色の順序が入れ替わる。 */
+        for (int i = 1; i < 32; i++) {
+            T_CHECK(S.lut5[i] >= S.lut5[i - 1]);
+        }
+        for (int i = 1; i < 64; i++) {
+            T_CHECK(S.lut6[i] >= S.lut6[i - 1]);
+        }
+
+        /* 中間は必ず持ち上がる（沈んだら補正の向きが逆） */
+        T_CHECK(S.lut5[16] > 16);
+        T_CHECK(S.lut6[32] > 32);
+
+        /* ガンマを上げるほど強く持ち上がる */
+        {
+            const uint8_t mid18 = S.lut6[32];
+            cdk_screen_set_gamma(&S, 30);
+            T_CHECK(S.lut6[32] > mid18);
+            T_EQ_INT(S.lut6[0], 0);
+            T_EQ_INT(S.lut6[63], 63);
+        }
+
+        /* 同じ入力なら必ず同じ表になる（実機とホストで一致する前提） */
+        {
+            uint8_t a5[32], a6[64];
+            cdk_screen_set_gamma(&S, 22);
+            memcpy(a5, S.lut5, sizeof(a5));
+            memcpy(a6, S.lut6, sizeof(a6));
+            cdk_screen_set_gamma(&S, 10);
+            cdk_screen_set_gamma(&S, 22);
+            T_EQ_MEM(a5, S.lut5, sizeof(a5));
+            T_EQ_MEM(a6, S.lut6, sizeof(a6));
+        }
+
+        /* 描画にも効くこと。無補正なら素のパレット値で塗られる。 */
+        setup();
+        feed("\033[31mA");
+        T.cursor_visible = false;
+        cdk_screen_draw(&S, &CV, &T, true);
+        T_CHECK(count_color(0, 0, 1, S.palette[1]) > 0);
+
+        /* 補正を入れると、同じ赤がもう素のパレット値では出てこない。 */
+        setup();
+        cdk_screen_set_gamma(&S, 22);
+        feed("\033[31mA");
+        T.cursor_visible = false;
+        cdk_screen_draw(&S, &CV, &T, true);
+        T_CHECK(count_color(0, 0, 1, S.palette[1]) == 0);
+        {
+            const uint16_t raw = S.palette[1];
+            const uint16_t want =
+                (uint16_t)((S.lut5[(raw >> 11) & 0x1Fu] << 11) |
+                           (S.lut6[(raw >> 5) & 0x3Fu] << 5) | S.lut5[raw & 0x1Fu]);
+            T_CHECK(count_color(0, 0, 1, want) > 0);
+            T_CHECK(((want >> 11) & 0x1Fu) > ((raw >> 11) & 0x1Fu)); /* 赤が明るく */
+        }
+
+        /* **dim は補正の前に掛かる。** 逆順だと「補正後の半分」になり、
+         * このパネルで狙っている明るさより沈む。 */
+        setup();
+        cdk_screen_set_gamma(&S, 22);
+        feed("\033[2;37mA"); /* dim + 白 */
+        T.cursor_visible = false;
+        cdk_screen_draw(&S, &CV, &T, true);
+        {
+            const uint16_t half = (uint16_t)(((S.palette[7] & 0xF800u) >> 1 & 0xF800u) |
+                                             ((S.palette[7] & 0x07E0u) >> 1 & 0x07E0u) |
+                                             ((S.palette[7] & 0x001Fu) >> 1));
+            const uint16_t want =
+                (uint16_t)((S.lut5[(half >> 11) & 0x1Fu] << 11) |
+                           (S.lut6[(half >> 5) & 0x3Fu] << 5) | S.lut5[half & 0x1Fu]);
+            T_CHECK(count_color(0, 0, 1, want) > 0);
+        }
+
+        setup();
+    }
+
     free(blob);
     return t_report("test_screen");
 }

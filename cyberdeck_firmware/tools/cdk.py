@@ -421,8 +421,10 @@ def cmd_shot(args) -> int:
         if info is None:
             print("[cdk] SHOT_INFO が返りません", file=sys.stderr)
             return 1
-        width, height, fmt, _r0, _r1, _r2, byte_len = struct.unpack("<HHBBBBI", info[1])
-        print(f"[cdk] {width}x{height} fmt={fmt} {byte_len} バイト")
+        width, height, fmt, gamma_x10, _r0, _r1, byte_len = struct.unpack(
+            "<HHBBBBI", info[1])
+        note = "" if gamma_x10 in (0, 10) else f" gamma={gamma_x10 / 10:.1f}"
+        print(f"[cdk] {width}x{height} fmt={fmt} {byte_len} バイト{note}")
 
         buf = bytearray(byte_len)
         seen = 0
@@ -462,13 +464,15 @@ def cmd_shot(args) -> int:
 
     if args.verify or args.verify_vt:
         return verify_against_reference(raw, width, height, out, args.verify_vt,
-                                        getattr(args, "preedit", None))
+                                        getattr(args, "preedit", None),
+                                        gamma_x10)
     return 0
 
 
 def verify_against_reference(raw: bytes, width: int, height: int, png_path: Path,
                              vt_file: str | None = None,
-                             preedit_file: str | None = None) -> int:
+                             preedit_file: str | None = None,
+                             gamma_x10: int = 10) -> int:
     """ホスト側で同じ内容を描いてバイト単位で比較する。
 
     実機と PC で同じ純 C コードを動かしているので、一致しないなら
@@ -508,14 +512,16 @@ def verify_against_reference(raw: bytes, width: int, height: int, png_path: Path
 
     if vt_file:
         ref_path = HOST_BUILD_DIR / f"ref_vt_{width}x{height}.raw"
-        cmd = [str(exe), "vt", str(vt_file), str(width), str(height), str(ref_path)]
+        cmd = [str(exe), f"--gamma={gamma_x10}", "vt", str(vt_file),
+               str(width), str(height), str(ref_path)]
         if preedit_file:
             # 未確定文字列は引数ではなくファイルで渡す。Windows の argv は
             # ANSI コードページなので、日本語がここで壊れる。
             cmd.append(str(preedit_file))
     else:
         ref_path = HOST_BUILD_DIR / f"ref_{width}x{height}.raw"
-        cmd = [str(exe), "testpattern", str(width), str(height), str(ref_path)]
+        cmd = [str(exe), f"--gamma={gamma_x10}", "testpattern",
+               str(width), str(height), str(ref_path)]
     subprocess.run(cmd, check=True)
     ref = ref_path.read_bytes()
 

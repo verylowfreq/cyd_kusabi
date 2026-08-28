@@ -48,6 +48,8 @@ void cdk_screen_init(cdk_screen_t *s, const cdk_font_t *font)
      * 起動時から 100%。これ以上明るくする余地はファーム側には無い。 */
     s->default_fg = s->palette[15];
     s->default_bg = s->palette[0];
+
+    cdk_screen_set_gamma(s, 10u); /* 既定は無補正。基板ごとの値は呼び出し側が入れる */
 }
 
 int cdk_screen_cols(const cdk_screen_t *s, int canvas_w)
@@ -70,6 +72,95 @@ static uint16_t resolve(const cdk_screen_t *s, uint32_t color, bool is_fg)
         return s->palette[CDK_COLOR_GET_IDX(color)];
     }
     return is_fg ? s->default_fg : s->default_bg;
+}
+
+/* ---- ガンマ補正 --------------------------------------------------
+ *
+ * このパネルは中間調が沈んで、少し暗いだけの色がまったく読めなくなる。
+ * 0 と最大値を固定したまま中間だけ持ち上げる。
+ *
+ * **浮動小数を使わない。** `powf` の最終ビットはライブラリ実装によって
+ * 違いうるので、ホストの基準画像と実機の画面が 1 ビット違う、という形で
+ * `shot --verify` がたまに落ちることになる。整数だけで書けば、
+ * 同じ C コードが必ず同じ値を出す。
+ */
+
+/* 16.16 固定小数の平方根 */
+static uint32_t fx_sqrt(uint32_t x)
+{
+    uint64_t v = (uint64_t)x << 16; /* sqrt(x/2^16)*2^16 = sqrt(x*2^16) */
+    uint64_t r = 0;
+    uint64_t bit = (uint64_t)1 << 46;
+
+    while (bit > v) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return (uint32_t)r;
+}
+
+/* x^e。x, e とも 16.16 で 0..1 の範囲。
+ * e を 2 進展開して、x の 2^-k 乗（k 回の平方根）を掛け合わせる。 */
+static uint32_t fx_pow(uint32_t x, uint32_t e)
+{
+    uint32_t result = 1u << 16;
+    uint32_t cur = x;
+
+    for (int k = 0; k < 16; k++) {
+        cur = fx_sqrt(cur);
+        if (((e >> (15 - k)) & 1u) != 0u) {
+            result = (uint32_t)(((uint64_t)result * (uint64_t)cur) >> 16);
+        }
+    }
+    return result;
+}
+
+static void build_lut(uint8_t *lut, unsigned max, uint32_t e)
+{
+    for (unsigned i = 0; i <= max; i++) {
+        const uint32_t x = (uint32_t)(((uint64_t)i << 16) / max);
+        const uint32_t y = fx_pow(x, e);
+        /* 四捨五入して同じビット幅へ戻す */
+        lut[i] = (uint8_t)(((uint64_t)y * max + (1u << 15)) >> 16);
+    }
+}
+
+void cdk_screen_set_gamma(cdk_screen_t *s, uint8_t gamma_x10)
+{
+    s->gamma_x10 = gamma_x10;
+
+    if (gamma_x10 <= 10u) {
+        /* 無補正。恒等の対応表にしておけば、描画側は分岐しなくてよい。 */
+        for (unsigned i = 0; i < 32u; i++) {
+            s->lut5[i] = (uint8_t)i;
+        }
+        for (unsigned i = 0; i < 64u; i++) {
+            s->lut6[i] = (uint8_t)i;
+        }
+        return;
+    }
+
+    /* 指数は 1/gamma。gamma > 1 なので必ず 1.0 未満に収まる。 */
+    const uint32_t e = (uint32_t)((10u << 16) / gamma_x10);
+    build_lut(s->lut5, 31u, e);
+    build_lut(s->lut6, 63u, e);
+}
+
+/* セルの色が全部決まったあとに掛ける。 */
+static uint16_t gamma565(const cdk_screen_t *s, uint16_t c)
+{
+    const unsigned r = s->lut5[(c >> 11) & 0x1Fu];
+    const unsigned g = s->lut6[(c >> 5) & 0x3Fu];
+    const unsigned b = s->lut5[c & 0x1Fu];
+    return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
 /* RGB565 のまま各成分を半分にする。DIM 用。 */
@@ -124,6 +215,11 @@ void cdk_screen_draw_cell(const cdk_screen_t *s, cdk_canvas_t *cv,
     if ((cell->attr & CDK_ATTR_INVISIBLE) != 0u) {
         fg = bg;
     }
+
+    /* ここで初めてパネル補正を掛ける。dim も反転もカーソルも済んだあとなので、
+     * 「論理的な色を決めてから、パネルの都合で持ち上げる」順序になる。 */
+    fg = gamma565(s, fg);
+    bg = gamma565(s, bg);
 
     cdk_canvas_fill_rect(cv, x, y, cw * cells, ch, bg);
 

@@ -270,7 +270,8 @@ static void send_screenshot(void)
         .width = (uint16_t)s_canvas.w,
         .height = (uint16_t)s_canvas.h,
         .format = CDK_PIXFMT_RGB565_LE,
-        .reserved = {0, 0, 0},
+        .gamma_x10 = s_screen.gamma_x10,
+        .reserved = {0, 0},
         .byte_len = (uint32_t)cdk_canvas_bytes(s_canvas.w, s_canvas.h),
     };
 
@@ -394,6 +395,35 @@ static void cfg_or_seed(const char *key, const char *seed, char *buf, size_t cap
              esp_err_to_name(err));
     strncpy(buf, seed, cap - 1);
     buf[cap - 1] = '\0';
+}
+
+void cdk_apply_gamma_setting(void)
+{
+    char buf[16];
+    long g = CDK_BOARD_LCD_GAMMA_X10;
+
+    /* **ここで NVS を開けておく。** 起動時はまだ load_config() が呼ばれて
+     * いないので、これが無いと毎回「未設定」に見えて基板の既定値に落ちる。
+     * `set gamma` で書いた値が再起動で消えたように見えるのがこの症状。
+     * cdk_cfg_init() は何度呼んでもよい。 */
+    if (cdk_cfg_init() != ESP_OK) {
+        ESP_LOGW(TAG, "設定を開けないのでガンマは既定値 %ld を使います", g);
+    } else if (cdk_cfg_get(CDK_CFG_GAMMA, buf, sizeof(buf)) == ESP_OK && buf[0] != '\0') {
+        char *end = NULL;
+        const long v = strtol(buf, &end, 10);
+        /* 壊れた値で画面を読めなくしない。範囲外なら基板の既定値のまま。 */
+        if (end != buf && v >= 10 && v <= 40) {
+            g = v;
+        } else {
+            ESP_LOGW(TAG, "gamma=%s は範囲外 (10..40)。既定値 %ld を使います", buf, g);
+        }
+    }
+
+    cdk_screen_set_gamma(&s_screen, (uint8_t)g);
+
+    /* パレットではなくセルの色に掛けているので、描き直さないと変わらない。 */
+    cdk_term_mark_all_dirty(&s_term);
+    cdk_canvas_mark_all_dirty(&s_canvas);
 }
 
 static void load_config(void)
@@ -562,6 +592,11 @@ void app_main(void)
     }
     cdk_term_set_reply(&s_term, on_term_reply, NULL);
     ESP_LOGI(TAG, "端末 %d桁 x %d行 (%u バイト)", cols, rows, (unsigned)tmem);
+
+    /* **端末を作ったあとで呼ぶ。** 中で s_term をダーティにするので、
+     * cdk_term_init より前だと未初期化の領域を触ることになる。 */
+    cdk_apply_gamma_setting();
+    ESP_LOGI(TAG, "ガンマ補正 %u/10", (unsigned)s_screen.gamma_x10);
 
     draw_banner();
     cdk_screen_draw(&s_screen, &s_canvas, &s_term, true);

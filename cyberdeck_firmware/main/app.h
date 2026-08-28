@@ -37,6 +37,10 @@ typedef struct {
 
 /* main/cdk_editcmds.c。SD との読み書きだけを持つ。 */
 void cdk_edit_resolve_path(const char *arg, char *out, size_t cap);
+
+/* NVS の "gamma"（無ければ基板の既定値）を画面に反映し、全面を描き直す。
+ * `set gamma <値>` から呼ぶので、焼き直さずに実機で追い込める。 */
+void cdk_apply_gamma_setting(void);
 bool cdk_edit_file_load(cdk_edit_t *e, const char *path);
 bool cdk_edit_file_save(cdk_edit_t *e);
 

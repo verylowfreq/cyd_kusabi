@@ -27,6 +27,16 @@ typedef struct {
      * 6px 幅では太らせても潰れて読めない。xterm の既定と同じ振る舞い。 */
     bool bold_is_bright;
 
+    /* パネルの暗さを補正するガンマ。10 倍の整数で持つ（18 なら 1.8）。
+     * 10（= 1.0）で無補正。`cdk_screen_set_gamma()` で変える。
+     *
+     * **パレットではなくセルの色に最後に掛ける。** dim（半分にする）や
+     * 反転を先に済ませてから補正しないと、「論理的に半分の明るさ」ではなく
+     * 「補正後の値の半分」になってしまい、dim が沈みすぎる。 */
+    uint8_t gamma_x10;
+    uint8_t lut5[32]; /* 5bit 成分 (R,B) の対応表 */
+    uint8_t lut6[64]; /* 6bit 成分 (G) の対応表 */
+
     /* カーソルの前回位置。移動時にその行を描き直すため。 */
     int last_cx;
     int last_cy;
@@ -47,6 +57,16 @@ typedef struct {
 } cdk_screen_t;
 
 void cdk_screen_init(cdk_screen_t *s, const cdk_font_t *font);
+
+/* パネルの暗さを補正するガンマを設定する。gamma_x10 は 10 倍の整数
+ * （18 なら 1.8）。10 以下は無補正として扱う。
+ *
+ * 0 と最大値は動かさないので、黒は黒のまま、白は白のまま。中間だけ持ち上がる。
+ *
+ * **中身は整数演算だけで書いてある。** `powf` を使うとホストと実機で
+ * 最終ビットが揃う保証が無く、`shot --verify` の完全一致が
+ * たまに崩れることになる。整数なら同じ C コードが必ず同じ値を出す。 */
+void cdk_screen_set_gamma(cdk_screen_t *s, uint8_t gamma_x10);
 
 /* キャンバスに収まる桁数・行数。ステータス帯のぶんは呼び側で引くこと。 */
 int cdk_screen_cols(const cdk_screen_t *s, int canvas_w);
