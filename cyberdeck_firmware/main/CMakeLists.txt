@@ -6,4 +6,5 @@ idf_component_register(SRCS "main.c" "cdk_commands.c" "cdk_fscmds.c" "cdk_skkcmd
                                 port_skk port_spibus port_storage port_usbhid
                        EMBED_FILES
                            "${CMAKE_CURRENT_LIST_DIR}/../components/cdk_font/shinonome12.cdkfont"
-                           "${CMAKE_CURRENT_LIST_DIR}/../host/fixtures/vt/banner.vt")
+                           "${CMAKE_CURRENT_LIST_DIR}/../host/fixtures/vt/banner.vt"
+                           "${CMAKE_CURRENT_LIST_DIR}/../host/fixtures/vt/banner40.vt")

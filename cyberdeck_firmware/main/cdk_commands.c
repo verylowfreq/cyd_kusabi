@@ -183,6 +183,12 @@ static int cmd_set(int argc, char **argv, void *user)
     if (strcmp(argv[1], CDK_CFG_KEYMAP) == 0) {
         cdk_apply_keymap_setting();
     }
+    /* 拡大率だけは再起動が要る。桁数と行数が変わるので端末を作り直す
+     * 必要があり、その場でやると画面の中身が消える。**黙って効かないより、
+     * 効かないと言うほうがいい。** */
+    if (strcmp(argv[1], CDK_CFG_FONTSCALE) == 0) {
+        cdk_shell_printf(sh, "\033[33m再起動すると反映されます (reboot)\033[0m\r\n");
+    }
     return 0;
 }
 

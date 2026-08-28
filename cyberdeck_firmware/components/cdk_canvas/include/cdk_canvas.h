@@ -76,6 +76,14 @@ uint16_t cdk_canvas_get(const cdk_canvas_t *c, int x, int y);
 void cdk_canvas_blit_1bpp(cdk_canvas_t *c, int x, int y, int w, int h,
                           const uint8_t *bits, uint32_t fg, uint32_t bg);
 
+/* 同じものを scale 倍で描く。1 画素を scale x scale に広げるだけで、
+ * 間は補間しない（ビットマップフォントは字形そのものが最終形なので、
+ * なめらかにすると輪郭が濁って読みにくくなる）。
+ * w, h は**元のビットマップの大きさ**。描かれるのは w*scale x h*scale。 */
+void cdk_canvas_blit_1bpp_scaled(cdk_canvas_t *c, int x, int y, int w, int h,
+                                 const uint8_t *bits, uint32_t fg, uint32_t bg,
+                                 int scale);
+
 /* --- M0 の検証用テストパターン ---
  * 決定的に描く。同じ w,h ならホストでも実機でも 1 バイト違わず同じ結果になること。
  * これが `cdk.py shot --verify` の基準になる。 */

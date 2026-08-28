@@ -137,26 +137,37 @@ void cdk_canvas_rect(cdk_canvas_t *c, int x, int y, int w, int h, uint16_t color
 void cdk_canvas_blit_1bpp(cdk_canvas_t *c, int x, int y, int w, int h,
                           const uint8_t *bits, uint32_t fg, uint32_t bg)
 {
-    if (bits == NULL || w <= 0 || h <= 0) {
+    cdk_canvas_blit_1bpp_scaled(c, x, y, w, h, bits, fg, bg, 1);
+}
+
+void cdk_canvas_blit_1bpp_scaled(cdk_canvas_t *c, int x, int y, int w, int h,
+                                 const uint8_t *bits, uint32_t fg, uint32_t bg,
+                                 int scale)
+{
+    if (bits == NULL || w <= 0 || h <= 0 || scale <= 0) {
         return;
     }
     const int stride = (w + 7) / 8;
     int touched_y0 = c->h;
     int touched_y1 = 0;
 
-    for (int row = 0; row < h; row++) {
+    /* 元の 1 画素を scale x scale の正方形に広げる。**間を補間しない。**
+     * ビットマップフォントは字形そのものが最終形なので、なめらかにすると
+     * かえって輪郭が濁って読みにくくなる。 */
+    for (int row = 0; row < h * scale; row++) {
         const int yy = y + row;
         if (yy < 0 || yy >= c->h) {
             continue;
         }
-        const uint8_t *src = bits + (size_t)row * (size_t)stride;
+        const uint8_t *src = bits + (size_t)(row / scale) * (size_t)stride;
         uint16_t *dst = c->pix + (size_t)yy * (size_t)c->w;
-        for (int col = 0; col < w; col++) {
+        for (int col = 0; col < w * scale; col++) {
             const int xx = x + col;
             if (xx < 0 || xx >= c->w) {
                 continue;
             }
-            const bool on = (src[col >> 3] >> (7 - (col & 7))) & 1u;
+            const int sc = col / scale;
+            const bool on = (src[sc >> 3] >> (7 - (sc & 7))) & 1u;
             if (on) {
                 dst[xx] = (uint16_t)fg;
             } else if (bg != CDK_CANVAS_NO_BG) {

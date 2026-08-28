@@ -70,7 +70,11 @@ typedef struct {
      * `set gamma` で実機を追い込んだ瞬間に `shot --verify` が
      * 「実機が壊れた」ように落ちる。落ちる理由はガンマ違いなので紛らわしい。 */
     uint8_t  gamma_x10;
-    uint8_t  reserved[2];
+    /* 文字の拡大率（1 か 2）。ガンマと同じ理由でここに載せる:
+     * 基準レンダラが同じ倍率で描かないと `shot --verify` が落ち、
+     * しかも「実機が壊れた」ように見える。 */
+    uint8_t  scale;
+    uint8_t  reserved[1];
     uint32_t byte_len;
 } cdk_wire_shot_info_t;
 

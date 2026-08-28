@@ -27,6 +27,9 @@ extern "C" {
 #define CDK_CFG_GAMMA     "gamma"
 /* キー配列。"us" か "jis"（DESIGN.md 7.4）。未設定なら us。 */
 #define CDK_CFG_KEYMAP    "keymap"
+/* 文字の拡大率。"1" か "2"。展示など離れて見るときに 2。
+ * **変えたら再起動が要る**（桁数と行数が変わるため）。 */
+#define CDK_CFG_FONTSCALE "fontscale"
 
 /* NVS を初期化する。何度呼んでもよい。 */
 esp_err_t cdk_cfg_init(void);

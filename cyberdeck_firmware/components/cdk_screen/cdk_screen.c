@@ -50,16 +50,36 @@ void cdk_screen_init(cdk_screen_t *s, const cdk_font_t *font)
     s->default_bg = s->palette[0];
 
     cdk_screen_set_gamma(s, 10u); /* 既定は無補正。基板ごとの値は呼び出し側が入れる */
+    s->scale = 1;
+}
+
+void cdk_screen_set_scale(cdk_screen_t *s, uint8_t scale)
+{
+    s->scale = (scale >= 1u) ? scale : 1u;
+}
+
+int cdk_screen_cell_w(const cdk_screen_t *s)
+{
+    const int sc = (s->scale > 0) ? s->scale : 1;
+    return s->font->cell_w * sc;
+}
+
+int cdk_screen_cell_h(const cdk_screen_t *s)
+{
+    const int sc = (s->scale > 0) ? s->scale : 1;
+    return s->font->cell_h * sc;
 }
 
 int cdk_screen_cols(const cdk_screen_t *s, int canvas_w)
 {
-    return (s->font->cell_w > 0) ? canvas_w / s->font->cell_w : 0;
+    const int cw = cdk_screen_cell_w(s);
+    return (cw > 0) ? canvas_w / cw : 0;
 }
 
 int cdk_screen_rows(const cdk_screen_t *s, int canvas_h)
 {
-    return (s->font->cell_h > 0) ? canvas_h / s->font->cell_h : 0;
+    const int ch = cdk_screen_cell_h(s);
+    return (ch > 0) ? canvas_h / ch : 0;
 }
 
 static uint16_t resolve(const cdk_screen_t *s, uint32_t color, bool is_fg)
@@ -174,8 +194,11 @@ void cdk_screen_draw_cell(const cdk_screen_t *s, cdk_canvas_t *cv,
                           const cdk_cell_t *cell, int col, int row, bool cursor)
 {
     const cdk_font_t *f = s->font;
-    const int cw = f->cell_w;
-    const int ch = f->cell_h;
+    /* **セルの大きさは倍率込み。** グリフのビットマップは元の大きさのまま
+     * なので、描くときだけ scale 倍に広げる（cdk_canvas_blit_1bpp_scaled）。 */
+    const int sc = (s->scale > 0) ? s->scale : 1;
+    const int cw = f->cell_w * sc;
+    const int ch = f->cell_h * sc;
     const int x = s->origin_x + col * cw;
     const int y = s->origin_y + row * ch;
 
@@ -227,14 +250,21 @@ void cdk_screen_draw_cell(const cdk_screen_t *s, cdk_canvas_t *cv,
     if (cp != 0u && cp != (uint32_t)' ') {
         cdk_glyph_t g;
         (void)cdk_font_glyph(f, cp, cells, &g);
-        cdk_canvas_blit_1bpp(cv, x, y, g.width, ch, g.bits, fg, CDK_CANVAS_NO_BG);
+        cdk_canvas_blit_1bpp_scaled(cv, x, y, g.width, f->cell_h, g.bits, fg,
+                                    CDK_CANVAS_NO_BG, sc);
     }
 
+    /* 下線と取り消し線も倍率ぶん太らせる。1 画素のままだと、
+     * 字が 2 倍になったときに線だけ細くて浮いて見える。 */
     if ((cell->attr & CDK_ATTR_UNDERLINE) != 0u) {
-        cdk_canvas_hline(cv, x, y + ch - 2, cw * cells, fg);
+        for (int i = 0; i < sc; i++) {
+            cdk_canvas_hline(cv, x, y + ch - 2 * sc + i, cw * cells, fg);
+        }
     }
     if ((cell->attr & CDK_ATTR_STRIKE) != 0u) {
-        cdk_canvas_hline(cv, x, y + ch / 2, cw * cells, fg);
+        for (int i = 0; i < sc; i++) {
+            cdk_canvas_hline(cv, x, y + ch / 2 + i, cw * cells, fg);
+        }
     }
 }
 

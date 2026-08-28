@@ -14,7 +14,7 @@ static bool s_inited;
 static const char *const KEYS[] = {
     CDK_CFG_WIFI_SSID, CDK_CFG_WIFI_PSK,
     CDK_CFG_SSH_HOST,  CDK_CFG_SSH_USER, CDK_CFG_SSH_PASS,
-    CDK_CFG_GAMMA,     CDK_CFG_KEYMAP,
+    CDK_CFG_GAMMA,     CDK_CFG_KEYMAP,  CDK_CFG_FONTSCALE,
     NULL,
 };
 

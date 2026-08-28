@@ -37,6 +37,17 @@ typedef struct {
     uint8_t lut5[32]; /* 5bit 成分 (R,B) の対応表 */
     uint8_t lut6[64]; /* 6bit 成分 (G) の対応表 */
 
+    /* 文字の拡大率。1 が等倍、2 で 2 倍（展示用の大きい文字）。
+     *
+     * **フォントを差し替えるのではなく、12px のグリフを画素ごと広げる。**
+     * 24px の日本語ビットマップフォントを別に持つと、字形もカバー範囲も
+     * 変わって「その字だけ出ない」問題を新しく作る。等倍のグリフを
+     * 2x2 に広げるだけなら、字形もカバー範囲もそのままで容量も増えない。
+     *
+     * 画面の桁数・行数はこれで変わる（480x320 なら 80x26 → 40x13）ので、
+     * 変えたら cdk_term を作り直すこと。 */
+    uint8_t scale;
+
     /* カーソルの前回位置。移動時にその行を描き直すため。 */
     int last_cx;
     int last_cy;
@@ -67,6 +78,14 @@ void cdk_screen_init(cdk_screen_t *s, const cdk_font_t *font);
  * 最終ビットが揃う保証が無く、`shot --verify` の完全一致が
  * たまに崩れることになる。整数なら同じ C コードが必ず同じ値を出す。 */
 void cdk_screen_set_gamma(cdk_screen_t *s, uint8_t gamma_x10);
+
+/* 文字の拡大率。1 か 2。**桁数と行数が変わる**ので、これを変えたら
+ * cdk_screen_cols/rows を取り直して cdk_term を作り直すこと。 */
+void cdk_screen_set_scale(cdk_screen_t *s, uint8_t scale);
+
+/* 拡大率込みのセルの大きさ。桁数の計算と重ね描きの位置合わせに使う。 */
+int cdk_screen_cell_w(const cdk_screen_t *s);
+int cdk_screen_cell_h(const cdk_screen_t *s);
 
 /* キャンバスに収まる桁数・行数。ステータス帯のぶんは呼び側で引くこと。 */
 int cdk_screen_cols(const cdk_screen_t *s, int canvas_w);

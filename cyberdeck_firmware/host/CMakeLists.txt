@@ -120,6 +120,13 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_board_pins.py)
 
+    # 起動バナーが桁数に収まっているか。#7（枠線の桁ずれ）は人間が画面を
+    # 見て気づいたもので、スクリーンショットと基準画像は一致していた。
+    # 同じコードが同じ間違いを描く以上、数えるならここで数えるしかない。
+    add_test(NAME banner_width
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_banner_width.py)
+
     add_test(NAME skk_fixture_reproducible
              COMMAND ${CMAKE_COMMAND}
                      -DPY=${Python3_EXECUTABLE}

@@ -337,6 +337,111 @@ int main(void)
         T_CHECK(((unsigned char)p[0] & 0xC0u) != 0x80u);
     }
 
+    T_CASE("2 倍にすると桁数と行数が半分になる");
+    {
+        setup();
+        T_EQ_INT(cdk_screen_cols(&S, COLS * CW), COLS);
+        T_EQ_INT(cdk_screen_rows(&S, ROWS * CH), ROWS);
+        T_EQ_INT(cdk_screen_cell_w(&S), CW);
+        T_EQ_INT(cdk_screen_cell_h(&S), CH);
+
+        cdk_screen_set_scale(&S, 2);
+        T_EQ_INT(cdk_screen_cell_w(&S), CW * 2);
+        T_EQ_INT(cdk_screen_cell_h(&S), CH * 2);
+        T_EQ_INT(cdk_screen_cols(&S, COLS * CW), COLS / 2);
+        T_EQ_INT(cdk_screen_rows(&S, ROWS * CH), ROWS / 2);
+
+        /* 実機の寸法でも確かめる。480x320 は両方とも割り切れて、
+         * 余りが 8px（ステータス帯の予約分）になる。 */
+        cdk_screen_set_scale(&S, 1);
+        T_EQ_INT(cdk_screen_cols(&S, 480), 80);
+        T_EQ_INT(cdk_screen_rows(&S, 320), 26);
+        cdk_screen_set_scale(&S, 2);
+        T_EQ_INT(cdk_screen_cols(&S, 480), 40);
+        T_EQ_INT(cdk_screen_rows(&S, 320), 13);
+        T_EQ_INT(320 - 13 * 24, 8);
+        T_EQ_INT(320 - 26 * 12, 8);
+
+        cdk_screen_set_scale(&S, 1);
+    }
+
+    T_CASE("2 倍のセルは 2 倍の場所に出る");
+    {
+        setup();
+        cdk_screen_set_scale(&S, 2);
+        feed("\033[44mA"); /* 青背景 */
+        T.cursor_visible = false;
+        cdk_screen_draw(&S, &CV, &T, true);
+
+        /* 1 セルが 12x24 を占める */
+        T_EQ_U32(cdk_canvas_get(&CV, 0, 0), S.palette[4]);
+        T_EQ_U32(cdk_canvas_get(&CV, CW * 2 - 1, CH * 2 - 1), S.palette[4]);
+        /* その外は塗られていない */
+        T_EQ_U32(cdk_canvas_get(&CV, CW * 2, 0), S.default_bg);
+    }
+
+    T_CASE("2 倍の字は等倍の字を 2x2 に広げたものと一致する");
+    {
+        /* **これが「倍にする」の定義。** 別のフォントに差し替えるのではなく、
+         * 同じグリフを画素ごと広げる。ずれると字形が変わる。 */
+        static uint16_t small[COLS * CW * ROWS * CH];
+        static uint16_t big[COLS * CW * ROWS * CH];
+        cdk_canvas_t cs, cb;
+
+        setup();
+        cdk_canvas_init(&cs, small, COLS * CW, ROWS * CH);
+        cdk_canvas_clear(&cs, CDK_BLACK);
+        feed("A");
+        T.cursor_visible = false;
+        cdk_screen_draw(&S, &cs, &T, true);
+
+        setup();
+        cdk_canvas_init(&cb, big, COLS * CW, ROWS * CH);
+        cdk_canvas_clear(&cb, CDK_BLACK);
+        cdk_screen_set_scale(&S, 2);
+        feed("A");
+        T.cursor_visible = false;
+        cdk_screen_draw(&S, &cb, &T, true);
+
+        for (int y = 0; y < CH; y++) {
+            for (int x = 0; x < CW; x++) {
+                const uint16_t want = cdk_canvas_get(&cs, x, y);
+                /* 元の 1 画素が 2x2 に広がっている */
+                T_EQ_U32(cdk_canvas_get(&cb, x * 2 + 0, y * 2 + 0), want);
+                T_EQ_U32(cdk_canvas_get(&cb, x * 2 + 1, y * 2 + 0), want);
+                T_EQ_U32(cdk_canvas_get(&cb, x * 2 + 0, y * 2 + 1), want);
+                T_EQ_U32(cdk_canvas_get(&cb, x * 2 + 1, y * 2 + 1), want);
+            }
+        }
+    }
+
+    T_CASE("2 倍でも全角は 2 桁を占める");
+    {
+        setup();
+        cdk_screen_set_scale(&S, 2);
+        feed("\033[41m漢");
+        T.cursor_visible = false;
+        cdk_screen_draw(&S, &CV, &T, true);
+
+        /* 全角 1 文字で 24x24。**角の画素で判定しない**（字の墨が乗っている
+         * ことがある）。背景色が範囲内にはあって範囲外には無い、で見る。 */
+        int inside = 0, outside = 0;
+        for (int y = 0; y < CH * 2; y++) {
+            for (int x = 0; x < CW * 4; x++) {
+                if (cdk_canvas_get(&CV, x, y) == S.palette[1]) {
+                    inside++;
+                }
+            }
+            for (int x = CW * 4; x < CW * 6; x++) {
+                if (cdk_canvas_get(&CV, x, y) == S.palette[1]) {
+                    outside++;
+                }
+            }
+        }
+        T_CHECK(inside > 0);
+        T_EQ_INT(outside, 0);
+    }
+
     T_CASE("ガンマ補正");
     {
         /* 1.0 以下は恒等。描画側が分岐しなくて済むことの担保。 */

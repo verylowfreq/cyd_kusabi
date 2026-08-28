@@ -60,6 +60,11 @@ extern const uint8_t font_end[] asm("_binary_shinonome12_cdkfont_end");
 extern const uint8_t banner_start[] asm("_binary_banner_vt_start");
 extern const uint8_t banner_end[] asm("_binary_banner_vt_end");
 
+/* 2 倍のときは 40 桁 x 13 行しかないので、いつものバナーは枠がはみ出し、
+ * 全体（約 20 行）も画面に収まらない。展示用の短いものに差し替える。 */
+extern const uint8_t banner40_start[] asm("_binary_banner40_vt_start");
+extern const uint8_t banner40_end[] asm("_binary_banner40_vt_end");
+
 static cdk_display_info_t s_disp;
 static cdk_canvas_t       s_canvas;
 static uint16_t          *s_pixels;
@@ -273,7 +278,8 @@ static void send_screenshot(void)
         .height = (uint16_t)s_canvas.h,
         .format = CDK_PIXFMT_RGB565_LE,
         .gamma_x10 = s_screen.gamma_x10,
-        .reserved = {0, 0},
+        .scale = s_screen.scale,
+        .reserved = {0},
         .byte_len = (uint32_t)cdk_canvas_bytes(s_canvas.w, s_canvas.h),
     };
 
@@ -364,7 +370,13 @@ static void term_printf(const char *fmt, ...)
 
 static void draw_banner(void)
 {
-    cdk_term_feed(&s_term, banner_start, (size_t)(banner_end - banner_start));
+    /* 桁数で選ぶ（拡大率ではなく）。パネルが変わって桁数が減っても
+     * 勝手に短いほうへ倒れる。 */
+    const bool narrow = s_term.cols < 60;
+    const uint8_t *p = narrow ? banner40_start : banner_start;
+    const size_t   n = narrow ? (size_t)(banner40_end - banner40_start)
+                              : (size_t)(banner_end - banner_start);
+    cdk_term_feed(&s_term, p, n);
     s_dirty = true;
 }
 
@@ -602,6 +614,25 @@ void app_main(void)
              s_font.cell_w, s_font.cell_h, (unsigned)font_len);
 
     cdk_screen_init(&s_screen, &s_font);
+
+    /* **端末を作る前に読む。** 拡大率で桁数と行数が変わるので、
+     * cdk_term_init より後だと寸法が合わなくなる。ガンマや keymap と違って
+     * その場では反映できず、再起動が要るのはこのため。 */
+    {
+        char buf[8];
+        long v = 1;
+        if (cdk_cfg_init() == ESP_OK &&
+            cdk_cfg_get(CDK_CFG_FONTSCALE, buf, sizeof(buf)) == ESP_OK &&
+            buf[0] != '\0') {
+            v = strtol(buf, NULL, 10);
+            if (v < 1 || v > 2) {
+                ESP_LOGW(TAG, "fontscale=%s は 1 か 2 のみ。1 を使います", buf);
+                v = 1;
+            }
+        }
+        cdk_screen_set_scale(&s_screen, (uint8_t)v);
+    }
+
     cdk_canvas_clear(&s_canvas, s_screen.default_bg);
 
     const int cols = cdk_screen_cols(&s_screen, s_disp.width);
@@ -714,9 +745,17 @@ void app_main(void)
 
     if (cdk_skkdict_open(&s_skkdict) == ESP_OK) {
         cdk_skk_set_dict(&s_skk, &s_skkdict);
-        term_printf("skk   : \033[32m送りあり%lu 送りなし%lu\033[0m 学習 %d 件\r\n",
-                    (unsigned long)s_skkdict.ari_count,
-                    (unsigned long)s_skkdict.nasi_count, learned);
+        /* 桁が狭いときは短く出す。**折り返すと 13 行しかない画面で
+         * 1 行余計に食い、バナーが上へ流れる。** */
+        if (s_term.cols < 60) {
+            term_printf("skk   : \033[32m%lu 語\033[0m 学習 %d\r\n",
+                        (unsigned long)(s_skkdict.ari_count + s_skkdict.nasi_count),
+                        learned);
+        } else {
+            term_printf("skk   : \033[32m送りあり%lu 送りなし%lu\033[0m 学習 %d 件\r\n",
+                        (unsigned long)s_skkdict.ari_count,
+                        (unsigned long)s_skkdict.nasi_count, learned);
+        }
     } else {
         term_printf("\033[33mskk   : 辞書がありません\033[0m\r\n");
     }
