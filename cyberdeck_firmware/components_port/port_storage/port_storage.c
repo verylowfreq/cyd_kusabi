@@ -13,6 +13,20 @@
 #include "driver/spi_common.h"
 #include "hal/spi_types.h"
 #include "sdmmc_cmd.h"
+
+/* **不具合 #34 の再発防止。** ここは「3」と書いて範囲外になり、起動時に
+ * `invalid host_id` で落ちて発覚した側。落ちたおかげで LCD 側の
+ * 静かな取り違えにも気づけたが、次は実行時ではなくビルドで止める。 */
+/* メッセージは ASCII。理由は port_display.c の同じ assert のところ。 */
+_Static_assert(CDK_BOARD_SD_SPI_HOST < SPI_HOST_MAX,
+               "SD SPI host out of range. spi_host_device_t is off by one "
+               "from the peripheral name: SPI1_HOST=0/SPI2_HOST=1/SPI3_HOST=2");
+/* v1 は LCD と SD でバスを分けている (CDK_BOARD_SPI_SHARED = 0)。
+ * 同じホストに載せたまま共有の切り替えを持たないと、SD を触った瞬間に
+ * 画面が壊れる。 */
+_Static_assert(CDK_BOARD_SD_SPI_HOST != CDK_BOARD_LCD_SPI_HOST,
+               "LCD and SD are on the same SPI host. To share a bus, set "
+               "CDK_BOARD_SPI_SHARED=1 and go through port_spibus.");
 #endif
 
 #include <string.h>

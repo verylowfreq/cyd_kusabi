@@ -13,6 +13,36 @@
 #include "hal/spi_types.h"
 #include "esp_lcd_panel_commands.h"
 #include "esp_lcd_panel_io.h"
+#include "soc/spi_pins.h"
+
+/* **不具合 #34 の再発防止。** HARDWARE_DESIGN.md は「LCD の 4 本は SPI2
+ * (FSPI) の IO_MUX ピンそのものなので GPIO マトリクスを通らず 80MHz 出せる」
+ * を根拠に、この 4 本をここに固定している。
+ *
+ * ところが `CDK_BOARD_LCD_SPI_HOST` を 1 つ間違えて SPI3 に載せると、
+ * **初期化も転送も成功したまま IO_MUX 直結だけが静かに失われる**。
+ * 画面は正常に出るので、実機で見ても host テストでも気づけない。
+ * 実際、SD が範囲外の番号で落ちてくれなければ見つからなかった。
+ *
+ * なので「速いはず」の前提そのものを SoC の定義と突き合わせてビルドを止める。
+ * `spi_host_device_t` は SPI1_HOST=0 / SPI2_HOST=1 / SPI3_HOST=2 で
+ * 周辺機能名と 1 つずれるため、`2` と書くとここで落ちる。 */
+/* **メッセージは ASCII で書く。** gcc は静的アサートの文字列を
+ * そのままバイトで診断に出すので、日本語だと 8 進エスケープの羅列になり、
+ * 肝心の「どう直すか」が読めなくなる（この assert を故障注入で試して判明）。
+ * 説明は上のコメントに書き、メッセージは短い ASCII にする。 */
+_Static_assert(CDK_BOARD_LCD_SPI_HOST == SPI2_HOST,
+               "LCD pins are SPI2 IO_MUX pins: host must be SPI2_HOST. "
+               "Note spi_host_device_t is off by one from the peripheral "
+               "name (SPI1_HOST=0/SPI2_HOST=1/SPI3_HOST=2). See "
+               "HARDWARE_DESIGN.md before changing.");
+_Static_assert(CDK_BOARD_LCD_CS   == SPI2_IOMUX_PIN_NUM_CS &&
+               CDK_BOARD_LCD_MOSI == SPI2_IOMUX_PIN_NUM_MOSI &&
+               CDK_BOARD_LCD_SCLK == SPI2_IOMUX_PIN_NUM_CLK &&
+               CDK_BOARD_LCD_MISO == SPI2_IOMUX_PIN_NUM_MISO,
+               "LCD pins left the SPI2 IO_MUX set: routing falls back to the "
+               "GPIO matrix and 80MHz is lost. The picture still looks fine, "
+               "so this is invisible on device.");
 #endif
 #include "esp_check.h"
 #include "esp_heap_caps.h"
