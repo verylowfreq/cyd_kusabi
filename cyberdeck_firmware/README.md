@@ -116,17 +116,23 @@ tools/             PC 側スクリプト（cdk.py / mkfont.py / skk_build.py）
 
 ## SKK 辞書
 
-辞書はリポジトリに入れない（SKK-JISYO.L は 4.5MB あり、ライセンスも別）。
+辞書はリポジトリに入れない（4MB あり、ライセンスも別）。
 初回だけ落としてフラッシュへ焼く:
 
 ```powershell
-curl -O https://skk-dev.github.io/dict/SKK-JISYO.L.gz
-gzip -d SKK-JISYO.L.gz
-python tools/cdk.py dict SKK-JISYO.L        # バイナリ化 → skkdict へ書き込み
+curl -O https://skk-dev.github.io/dict/SKK-JISYO.L.unannotated.gz
+gzip -d SKK-JISYO.L.unannotated.gz
+python tools/cdk.py dict SKK-JISYO.L.unannotated   # バイナリ化 → skkdict へ書き込み
 ```
 
-バイナリで 6.86MB。`skkdict` パーティション（8MB）に収まる。焼き先は
-ビルド済みのパーティション表から引くので、オフセットを指定しなくてよい。
+**注釈なしの版を使う。** 語彙は注釈つきの `SKK-JISYO.L` と同じ
+（送りあり 15,996 / 送りなし 159,795）で、候補の説明文が付かないだけ。
+バイナリが 6.86MB → 6.32MB になる。
+
+`skkdict` パーティション（8MB）に収まる。焼き先はビルド済みの
+パーティション表から引くので、オフセットを指定しなくてよい。
+注釈つきの辞書を焼きたければ `SKK-JISYO.L` をそのまま渡せばよい
+（`skkdict` コマンドで注釈が出るようになる）。
 
 SD の `/sdcard/skk/SKK-JISYO.bin` があればそちらが優先される。
 学習は `/sdcard/skk/user.dic` に追記される。

@@ -107,7 +107,7 @@ cyberdeck_firmware/
 └── tools/                      # ── PC 側スクリプト（Python）──
     ├── cdk.py                  # デバイス制御 CLI（後述）
     ├── mkfont.py               # 東雲BDF → フォントブロブ
-    ├── skk_build.py            # SKK-JISYO.L → バイナリ辞書   [M5]
+    ├── skk_build.py            # SKK-JISYO.* → バイナリ辞書   [M5]
     └── check_board_pins.py     # ピン定義と HARDWARE_DESIGN.md の突き合わせ
 ```
 
@@ -540,8 +540,8 @@ SSH の受信は**メインループが `select` で他と一緒にポーリン�
 
 ### 9.1 辞書
 
-SKK-JISYO.L は EUC-JP のテキストで 4.5MB（UTF-8 に直すと 6.2MB）。
-デバイス上でパースしない。`tools/skk_build.py` で PC 側でバイナリ化する:
+**使うのは `SKK-JISYO.L.unannotated`**（注釈なしの版）。EUC-JP のテキストで
+4.1MB。デバイス上でパースしない。`tools/skk_build.py` で PC 側でバイナリ化する:
 
 ```
 ヘッダ 32 バイト   "SKKD" / version / flags / 件数 / 各領域のオフセット
@@ -564,16 +564,37 @@ SKK-JISYO.L は EUC-JP のテキストで 4.5MB（UTF-8 に直すと 6.2MB）。
 **配置**（`cdk_skkdict_open` はこの順に探す）:
 
 1. microSD `/sdcard/skk/SKK-JISYO.bin`（差し替えが容易なので優先）
-2. フラッシュの `skkdict` パーティション（**SKK-JISYO.L 全体が入る**）
+2. フラッシュの `skkdict` パーティション（**L 全体が入る**）
 
 当初は「フラッシュには SKK-JISYO.M 相当の縮小版」と考えていたが、
-実測でバイナリが 6.86MB と分かったので `skkdict` を 8MB に広げて
+実測でバイナリが 4MB に収まらないと分かったので `skkdict` を 8MB に広げて
 全部載せることにした。SD 上のファイルは実機にカードを挿さないと
 用意できず、開発の回し方に直結するため。M（6,934 語）では実用にならない。
 
+#### 注釈を落とす
+
+**`SKK-JISYO.L.unannotated` を使う。**
+
+| | 語彙 | バイナリ |
+|---|---|---|
+| `SKK-JISYO.L` | 送りあり 15,996 / 送りなし 159,795 | 6,857,578 バイト |
+| `SKK-JISYO.L.unannotated` | **同じ** | **6,319,076 バイト** |
+
+**語彙は 1 語も減らない。**候補に付く説明文（`藍;植物` の `;植物`）が
+無いだけで、538KB 小さくなる。53 桁 20 行の画面では注釈を出す余地が
+そもそも少なく、`skkdict` コマンドで引いたときに出る程度だった。
+
+注釈つきで焼きたければ `SKK-JISYO.L` をそのまま渡せばよい。形式も
+`cdk_skk_cand_at` の注釈の切り離しもそのまま残してある。
+**8MB に広げた判断は変わらない**（注釈を落としても 4MB には収まらない）。
+
+ヘッダの注釈フラグは「注釈を残す設定でビルドしたか」ではなく
+**実際に注釈が入っているか**を表す。最初から注釈の無い辞書を
+`--no-annotations` なしでビルドしたときに「注釈あり」と名乗らないため。
+
 ```
-python tools/cdk.py dict SKK-JISYO.L        # 変換してフラッシュへ焼く
-python tools/cdk.py dict SKK-JISYO.L --build-only   # 大きさだけ見る
+python tools/cdk.py dict SKK-JISYO.L.unannotated               # 変換してフラッシュへ焼く
+python tools/cdk.py dict SKK-JISYO.L.unannotated --build-only  # 大きさだけ見る
 ```
 
 焼き先はビルド済みのパーティション表から引く。`0x410000` を決め打ちに
@@ -1075,7 +1096,7 @@ CoreS3 は空きピンが少ない。LCD / SD / 内蔵 I2C / USB / ログ UART /
 - [x] **完了条件**: 実機で `Nihon` → `▽にほn` → Space → `▼日本` → Enter で
       「日本」が入力でき、選んだ候補が再起動後も先頭に出る
 
-実測値: アプリ 1,286KB / 辞書 6.86MB（フラッシュ 8MB のうち） /
+実測値: アプリ 1,286KB / 辞書 6.32MB（フラッシュ 8MB のうち。注釈なし版） /
 内部ヒープ空き 約 160KB。
 
 ホスト側テスト 5 スイート追加（`test_skk_romkana` `test_skk_dict` `test_skk`

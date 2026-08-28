@@ -107,6 +107,21 @@ def parse(path: Path, encoding: str, keep_annotations: bool):
     return ari, nasi, dropped
 
 
+def has_annotations(ari, nasi) -> bool:
+    """候補列に注釈が 1 つでも残っているか。
+
+    ヘッダのフラグは「注釈を残す設定でビルドしたか」ではなく
+    **実際に入っているか**を表す。SKK-JISYO.L.unannotated のように
+    最初から注釈の無い辞書を、--no-annotations を付けずにビルドしたとき、
+    「注釈あり」と名乗ってしまうのを防ぐ。
+    """
+    for entries in (ari, nasi):
+        for _key, cands in entries:
+            if ";" in cands:
+                return True
+    return False
+
+
 def build(ari, nasi, keep_annotations: bool) -> bytes:
     # UTF-8 バイト順に並べ直す。デバイス側は memcmp で比べるため。
     ari = sorted(ari, key=lambda kv: kv[0].encode("utf-8"))
@@ -126,7 +141,7 @@ def build(ari, nasi, keep_annotations: bool) -> bytes:
     index_len = 4 * (len(ari_idx) + len(nasi_idx))
     record_off = index_off + index_len
 
-    flags = FLAG_ANNOTATIONS if keep_annotations else 0
+    flags = FLAG_ANNOTATIONS if (keep_annotations and has_annotations(ari, nasi)) else 0
     header = struct.pack(
         "<4sHHIIIIII",
         MAGIC, VERSION, flags,
@@ -166,6 +181,7 @@ def main() -> int:
         ari = ari[: args.limit]
         nasi = nasi[: args.limit]
 
+    annotated = keep and has_annotations(ari, nasi)
     blob = build(ari, nasi, keep)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(blob)
@@ -174,7 +190,7 @@ def main() -> int:
     print(f"[skk]   送りあり {len(ari):,} 件 / 送りなし {len(nasi):,} 件")
     print(f"[skk]   索引 {4 * (len(ari) + len(nasi)):,} バイト / "
           f"全体 {len(blob):,} バイト")
-    print(f"[skk]   注釈: {'あり' if keep else 'なし'}")
+    print(f"[skk]   注釈: {'あり' if annotated else 'なし'}")
     if dropped:
         print(f"[skk]   長すぎて捨てた行: {dropped}", file=sys.stderr)
     return 0
