@@ -27,7 +27,12 @@ ESP32-S3 サイバーデックのファームウェア。設計は [DESIGN.md](D
 | 試作機 M5Stack CoreS3 | 制御チャネル **COM22** (USB-Serial-JTAG) |
 | FT232 | ログチャネル **COM75** ← CoreS3 PORT.C (G17=TX / G18=RX / GND) |
 
-ポートは `--ctrl` / `--log` か環境変数 `CDK_CTRL` / `CDK_LOG` で変えられる。
+**v1 (最終ハード) はポートの乗り方が違う。** USB-Serial-JTAG が無いので、
+書き込みとログが UART0 (**COM76**)、制御チャネルが UART1 (**COM75**)。
+`cdk.py` は `.cdk_board` を見て自動で使い分けるので、普段は指定しなくてよい。
+
+上書きするときは `--ctrl` / `--log` / `--prog`、または環境変数
+`CDK_CTRL` / `CDK_LOG` / `CDK_PROG`。
 
 ---
 

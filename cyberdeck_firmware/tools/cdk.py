@@ -58,8 +58,40 @@ HOST_BUILD_DIR = PROJECT_DIR / "build-host"
 TOOLS_DIR = PROJECT_DIR / "tools"
 IDF_PATH = Path(os.environ.get("IDF_PATH", r"C:\DATA-0\Espressif\esp-idf-v5.5.5"))
 
-DEFAULT_CTRL = os.environ.get("CDK_CTRL", "COM22")
-DEFAULT_LOG = os.environ.get("CDK_LOG", "COM75")
+# ポートの既定値は**基板ごとに違う**。3 つの役割があり、どれが同じ線に
+# 乗っているかが基板で変わる。
+#
+#   PROG  esptool の書き込み口。EN と GPIO0 を叩ける線がここ
+#   CTRL  cdk_proto のバイナリフレーム
+#   LOG   ESP_LOG のテキスト
+#
+#   CoreS3: PROG=CTRL=USB-Serial-JTAG(COM22) / LOG=FT232(COM75)
+#   v1:     PROG=LOG=CH343(COM76)            / CTRL=FT232 で UART1(COM75)
+#
+# **リセットの掛け方も違う。** USB-Serial-JTAG と普通の USB シリアルでは
+# DTR/RTS の使い方が別。ここを取り違えると「起動ログが出ない」だけの症状に
+# なって、ポートの問題だと気づきにくい。
+BOARD_PORTS = {
+    "cores3": {"ctrl": "COM22", "log": "COM75", "prog": "ctrl", "reset": "usb"},
+    "v1":     {"ctrl": "COM75", "log": "COM76", "prog": "log",  "reset": "uart"},
+}
+
+
+def current_board() -> str:
+    """最後にビルドした基板。cdk.py build --board が書いている。"""
+    marker = PROJECT_DIR / ".cdk_board"
+    if marker.exists():
+        name = marker.read_text(encoding="utf-8").strip()
+        if name in BOARD_PORTS:
+            return name
+    return "cores3"
+
+
+_BOARD = current_board()
+_PORTS = BOARD_PORTS[_BOARD]
+
+DEFAULT_CTRL = os.environ.get("CDK_CTRL", _PORTS["ctrl"])
+DEFAULT_LOG = os.environ.get("CDK_LOG", _PORTS["log"])
 LOG_BAUD = 115200
 # 制御チャネルの速度。CoreS3 の USB-Serial-JTAG は速度の概念が無いので
 # 何でも通る。v1 は専用 UART なので実際に効く（port_link.c と合わせること）。
@@ -169,8 +201,30 @@ def open_port(name: str, baud: int = LOG_BAUD, timeout: float = 0.1) -> serial.S
     return s
 
 
-def hard_reset(port: serial.Serial) -> None:
-    """USB-Serial-JTAG 用のハードリセット (esptool の HardReset(uses_usb=True) 相当)。"""
+def prog_port(args) -> str:
+    """esptool と リセット に使う口。EN / GPIO0 を叩ける線はここ。"""
+    explicit = getattr(args, "prog", None)
+    if explicit:
+        return explicit
+    return args.log if _PORTS["prog"] == "log" else args.ctrl
+
+
+def hard_reset(port: serial.Serial, how: str = "usb") -> None:
+    """EN を落として離す。
+
+    how="usb"  USB-Serial-JTAG (esptool の HardReset(uses_usb=True) 相当)
+    how="uart" 普通の USB シリアル。DTR=GPIO0 / RTS=EN の自動リセット回路
+
+    **取り違えると症状が「起動ログが出ない」だけ**になり、ポートの問題だと
+    気づきにくい。基板ごとの既定は BOARD_PORTS を見ること。
+    """
+    if how == "uart":
+        port.setDTR(False)  # GPIO0 は HIGH のまま（通常起動）
+        port.setRTS(True)   # EN -> LOW
+        time.sleep(0.1)
+        port.setRTS(False)  # 離す
+        time.sleep(0.1)
+        return
 
     def set_rts(state: bool) -> None:
         port.setRTS(state)
@@ -310,14 +364,22 @@ def cmd_log(args) -> int:
 
 
 def cmd_boot(args) -> int:
+    """リセットして起動ログを取る。
+
+    リセット線は書き込み口 (PROG) にある。CoreS3 では CTRL と同じ線だが、
+    v1 では LOG と同じ線。同じポートなら 1 本だけ開く
+    （Windows では同じポートを 2 回開けない）。
+    """
+    prog = prog_port(args)
     log = open_port(args.log, LOG_BAUD, timeout=0.1)
-    ctrl = open_port(args.ctrl, CTRL_BAUD, timeout=0.05)
+    reset = log if prog == args.log else open_port(prog, CTRL_BAUD, timeout=0.05)
     try:
         log.reset_input_buffer()
-        hard_reset(ctrl)
+        hard_reset(reset, _PORTS["reset"])
         text = read_until(log, args.timeout, READY_SENTINEL, echo=True)
     finally:
-        ctrl.close()
+        if reset is not log:
+            reset.close()
         log.close()
 
     if READY_SENTINEL not in text:
@@ -549,7 +611,7 @@ def cmd_flash(args) -> int:
     cmd = [
         sys.executable, "-m", "esptool",
         "--chip", "esp32s3",
-        "--port", args.ctrl,
+        "--port", prog_port(args),
         "--baud", str(args.baud),
         "--before", "default_reset",
         "--after", "hard_reset",
@@ -617,7 +679,7 @@ def cmd_dict(args) -> int:
     cmd = [
         sys.executable, "-m", "esptool",
         "--chip", "esp32s3",
-        "--port", args.ctrl,
+        "--port", prog_port(args),
         "--baud", str(args.baud),
         "--before", "default_reset",
         "--after", "hard_reset",
@@ -771,6 +833,9 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ctrl", default=DEFAULT_CTRL, help=f"制御チャネル (既定 {DEFAULT_CTRL})")
     ap.add_argument("--log", default=DEFAULT_LOG, help=f"ログチャネル (既定 {DEFAULT_LOG})")
+    ap.add_argument("--prog", default=os.environ.get("CDK_PROG"),
+                    help="書き込みとリセットの口。既定は基板ごと "
+                         f"(いま {_BOARD}: {_PORTS['prog']} と同じ線)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("log", help="ログを有限時間だけ読む")
