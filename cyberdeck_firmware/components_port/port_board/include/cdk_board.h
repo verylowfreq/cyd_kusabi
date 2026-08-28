@@ -44,6 +44,9 @@
 /* ILI9342C は中間調が素直に出るので補正しない（10 = 1.0 倍）。 */
 #define CDK_BOARD_LCD_GAMMA_X10 10
 
+/* USB ホストが無いので使われない。定義だけ揃えておく。 */
+#define CDK_BOARD_KEYMAP_JIS_DEFAULT 0
+
 #elif defined(CONFIG_CDK_BOARD_V1)
 
 #define CDK_BOARD_NAME "cyberdeck v1"
@@ -117,6 +120,14 @@
 #define CDK_BOARD_USB_DM       19
 #define CDK_BOARD_USB_DP       20
 #define CDK_BOARD_USB_VBUS_EN   4
+
+/* キー配列の既定。**決め打ちではなく既定値**で、`set keymap us` で変えられる
+ * （DESIGN.md §7.4）。この機体で使っている HHKB が JIS なので JIS にしてある。
+ *
+ * 挿さっているのがどちらかは HID からは分からない。usage id は配列によらず
+ * 同じで刻印だけが違い、espressif/usb_host_hid は bCountryCode を出さない。
+ * 実際、US のまま `@` のキーを打つと `[` が出た（それで JIS と判った）。 */
+#define CDK_BOARD_KEYMAP_JIS_DEFAULT 1
 
 /* ---- 電池電圧（ADC1。ADC2 は WiFi 使用中に読めない） ---- */
 #define CDK_BOARD_BATT_ADC_GPIO 5

@@ -91,7 +91,7 @@ cyberdeck_firmware/
 ├── components_port/            # ── ESP-IDF 依存の薄いポート層 ──
 │   ├── port_display/           # esp_lcd + BSP、キャンバスをパネルへ転送    [M0]
 │   ├── port_link/              # cdk_proto を USB-Serial-JTAG に載せる      [M0]
-│   ├── port_input/             # USB HID → キーイベント                     [M7]
+│   ├── port_usbhid/            # USB HID ホスト → レポート                 [M7]
 │   ├── port_net/               # WiFi + SSH クライアント                    [M2]
 │   ├── port_board/             # 基板ごとのピンと能力（cdk_board.h）       [M6]
 │   ├── port_skk/               # 辞書をフラッシュ/SD から読む口             [M5]
@@ -1275,3 +1275,66 @@ USB HID のキーは最初から `cdk_key_t` で来るので、`route_key` か�
 - `components/` では `assert` と戻り値エラーコード。`ESP_LOG` / `ESP_ERROR_CHECK` は禁止
 - `components_port/` では `esp_err_t` を返し `ESP_LOGx` を使う
 - 動的確保は起動時のみを原則とする。端末バッファ・キャンバス・辞書索引は起動時に確保して以後固定
+
+#### USB キーボード ✅ できている (2026-08-29)
+
+実機の HHKB (VID=04FE PID=000D) で入力できる。`abc`、`@`、`:`、`"` を確認。
+
+```
+components/cdk_hid/          ブートプロトコル 8 バイト → キーイベント（純 C）
+components_port/port_usbhid/ usb_host + espressif/usb_host_hid、VBUS、キュー
+```
+
+**レポートディスクリプタは読まない。** キーボードなら全機種がブート
+プロトコル（modifier / 予約 / usage id x6 の 8 バイト固定）を持っていて、
+その usage id が `cdk_keycode_t` と**そのまま同じ値**になる。
+Enter も矢印も F キーも、変換表を書かずに `keycode` へ入れるだけで済む。
+
+##### キーはメインループだけが組み立てる
+
+USB 側がキューに積むのは**キーではなくレポート**。
+
+```
+[USB タスク] レポートをキューへ
+                    ↓
+[メインループ] cdk_usbhid_poll → cdk_hid_report → route_key
+```
+
+`route_key` は端末・画面・SKK・SSH を触るので USB のタスクから呼べない。
+キーに変換してから積むこともできるが、そうすると CapsLock の状態と
+オートリピートの時計を 2 つのタスクから触ることになる。
+**レポートのまま渡せば、状態はぜんぶメインループ側に閉じる。**
+
+##### オートリピートは時計で進める
+
+**ブートキーボードは状態が変わったときしかレポートを送らない。**
+押しっぱなしでも何も来ない。だからレポート到着を数えて繰り返すと、
+「別のキーを押したときだけ連射される」という妙な動きになる。
+`cdk_hid_tick()` にメインループの時刻を渡して進める。
+
+##### 配列は決め打ちできない
+
+同じキーの usage id は配列によらず同じで、**刻印だけが違う**。
+`espressif/usb_host_hid` は HID ディスクリプタの `bCountryCode` を
+外に出さないので、挿さっているのがどちらかは分からない。
+
+決め手は 1 打鍵で取れる。**`@` がどの usage id から出るか**:
+
+| | usage | 修飾 |
+|---|---|---|
+| US | 0x1F (2) | Shift |
+| JIS | 0x2F (P の右) | なし |
+
+実際 US のまま `@` のキーを打ったら `[` が出た。それで JIS と確定した。
+`set keymap us|jis` で切り替わり、NVS に残る。基板の既定は
+`CDK_BOARD_KEYMAP_JIS_DEFAULT`（v1 = JIS）。
+
+JIS にしか無い usage (0x87 ろ / 0x89 ￥ など) が来たら警告を出すが、
+**勝手には切り替えない**。`set keymap` で明示した設定を裏切らないため。
+
+##### SET_PROTOCOL が通らない個体がある
+
+実機の HHKB は `SET_PROTOCOL(boot)` がタイムアウトする。それでも
+8 バイトのブート形式で送ってくるので、**警告だけ出して続行する**。
+ここで諦めると「制御転送だけ通らないキーボード」が全部使えなくなる。
+長さが 8 未満のレポートは捨てているので、形式が違えばそこで落ちる。

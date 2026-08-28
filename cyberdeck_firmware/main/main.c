@@ -432,7 +432,7 @@ void cdk_apply_keymap_setting(void)
 {
 #if CDK_BOARD_HAS_USB_HOST
     char buf[16];
-    bool jis = false;
+    bool jis = (CDK_BOARD_KEYMAP_JIS_DEFAULT != 0);
 
     /* ガンマと同じ理由でここでも NVS を開ける（不具合 #38）。 */
     if (cdk_cfg_init() == ESP_OK &&
