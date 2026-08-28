@@ -5,6 +5,13 @@
 #if CDK_BOARD_HAS_BSP
 #include "bsp/display.h"
 #include "bsp/m5stack_core_s3.h"
+#else
+#include "driver/gpio.h"
+#include "driver/ledc.h"
+#include "driver/spi_master.h"
+#include "esp_lcd_ili9488.h"
+#include "esp_lcd_panel_commands.h"
+#include "esp_lcd_panel_io.h"
 #endif
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -15,20 +22,25 @@
 
 static const char *TAG = "cdk_disp";
 
-/* 1 回の DMA 転送で送る行数。バウンスバッファ 2 枚ぶんの内部 RAM を食う。
- * 480 幅なら 480*16*2 = 15360 バイト x 2 = 30KB。 */
+/* 1 回の転送で送る行数。
+ *
+ * CoreS3: エンディアン入れ替え用のバウンスバッファ 2 枚。
+ *         320 幅で 320*16*2 = 10KB x2。
+ * v1:     ILI9488 のドライバが RGB666 への変換バッファを内部に持つ。
+ *         480*16*3 = 23KB を起動時に 1 回だけ確保する。
+ *         **ドライバ側に境界検査が無い**ので、1 回に渡す画素数を
+ *         この帯より大きくしてはいけない。 */
 #define BOUNCE_ROWS 16
 
 static esp_lcd_panel_handle_t    s_panel;
-#if CDK_BOARD_HAS_BSP
-/* BSP が返すハンドル。転送には使わないが、受け取る先が要る。 */
 static esp_lcd_panel_io_handle_t s_io;
-#endif
-static uint16_t                 *s_bounce[2];
-static size_t                    s_bounce_px;
-static int                       s_bounce_idx;
+static size_t                    s_bounce_px; /* 帯 1 つぶんの画素数 */
 static int                       s_width;
 static int                       s_height;
+#if CDK_BOARD_HAS_BSP
+static uint16_t                 *s_bounce[2];
+static int                       s_bounce_idx;
+#endif
 
 /* パネルを起こすところだけが基板ごとに違う。転送 (cdk_display_flush) は
  * 大きさを実行時に持っているので、そのまま共通で動く。 */
@@ -58,29 +70,114 @@ static esp_err_t board_set_brightness(int percent)
     return bsp_display_brightness_set(percent);
 }
 
-#else /* v1 */
+#else /* v1: ILI9488 (480x320) を SPI2 の IO_MUX ピンで駆動する */
+
+/* バックライトは PWM。LEDC の 1 チャネルだけ使う。 */
+#define BL_TIMER   LEDC_TIMER_0
+#define BL_CHANNEL LEDC_CHANNEL_0
+#define BL_BITS    LEDC_TIMER_10_BIT
+
+static esp_err_t backlight_init(void)
+{
+    const ledc_timer_config_t timer = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = BL_BITS,
+        .timer_num = BL_TIMER,
+        .freq_hz = 5000,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    ESP_RETURN_ON_ERROR(ledc_timer_config(&timer), TAG, "ledc_timer");
+
+    const ledc_channel_config_t ch = {
+        .gpio_num = CDK_BOARD_LCD_BL,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = BL_CHANNEL,
+        .timer_sel = BL_TIMER,
+        .duty = 0,
+        .hpoint = 0,
+    };
+    return ledc_channel_config(&ch);
+}
 
 static esp_err_t board_panel_init(void)
 {
-    /* ピンは cdk_board.h に入っているが、**パネルのコントローラが未定**。
-     * 480x320 の SPI は ILI9488 か ST7796 が多く、初期化列も色の受け方も違う。
-     * ILI9488 は SPI だと 18bit しか受けない品種があり、その場合は
-     * キャンバスの RGB565 を転送時に 3 バイトへ展開することになる
-     * （転送量が 1.5 倍）。当てずっぽうで初期化列を書くと、
-     * 「何も出ない」のか「初期化が違う」のか切り分けられなくなる。 */
-    ESP_LOGE(TAG,
-             "パネルのコントローラが未定なので初期化できません "
-             "(HARDWARE_DESIGN.md「まだ決まっていないこと」)");
-    ESP_LOGE(TAG, "ピンは決まっている: CS=%d MOSI=%d SCLK=%d DC=%d RST=%d BL=%d",
-             CDK_BOARD_LCD_CS, CDK_BOARD_LCD_MOSI, CDK_BOARD_LCD_SCLK,
-             CDK_BOARD_LCD_DC, CDK_BOARD_LCD_RST, CDK_BOARD_LCD_BL);
-    return ESP_ERR_NOT_SUPPORTED;
+    s_width = CDK_BOARD_LCD_WIDTH;
+    s_height = CDK_BOARD_LCD_HEIGHT;
+    s_bounce_px = (size_t)s_width * BOUNCE_ROWS;
+
+    /* LCD は SPI2。CS/MOSI/SCLK/MISO が FSPI の IO_MUX ピンそのものなので、
+     * GPIO マトリクスを通らずに 80MHz まで上げられる（HARDWARE_DESIGN.md）。 */
+    const spi_bus_config_t bus = {
+        .mosi_io_num = CDK_BOARD_LCD_MOSI,
+        .miso_io_num = CDK_BOARD_LCD_MISO,
+        .sclk_io_num = CDK_BOARD_LCD_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = (int)(s_bounce_px * 3), /* RGB666 は 1 画素 3 バイト */
+    };
+    ESP_RETURN_ON_ERROR(
+        spi_bus_initialize(CDK_BOARD_LCD_SPI_HOST, &bus, SPI_DMA_CH_AUTO), TAG,
+        "spi_bus_initialize");
+
+    const esp_lcd_panel_io_spi_config_t io_cfg = {
+        .cs_gpio_num = CDK_BOARD_LCD_CS,
+        .dc_gpio_num = CDK_BOARD_LCD_DC,
+        .spi_mode = 0,
+        .pclk_hz = 40 * 1000 * 1000,
+        .trans_queue_depth = 4,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+    };
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi(
+                            (esp_lcd_spi_bus_handle_t)CDK_BOARD_LCD_SPI_HOST,
+                            &io_cfg, &s_io),
+                        TAG, "panel_io_spi");
+
+    /* 初期化列は atanisoft/esp_lcd_ili9488 に任せる。ベンダの
+     * レジスタ列を当てずっぽうで書くと、映らないときに
+     * 「配線」「初期化」「転送」のどれが悪いのか切り分けられない。
+     *
+     * **bits_per_pixel は 18 でなければならない。** ILI9488 は SPI 接続だと
+     * 16bit を受け付けず、RGB666 の 3 バイトしか通らない。
+     *
+     * 第 3 引数は変換用バッファの**画素数**（中で x3 して確保される）。
+     * これを起動時に 1 回取るので、転送のたびに malloc しない
+     * （DESIGN.md §14）。**draw_bitmap 側に境界検査は無い。**
+     * 1 回に渡す画素数がここを超えるとヒープを壊すので、
+     * 帯の大きさ (BOUNCE_ROWS 行) と必ず一致させること。 */
+    const esp_lcd_panel_dev_config_t panel_cfg = {
+        .reset_gpio_num = CDK_BOARD_LCD_RST,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
+        .bits_per_pixel = 18,
+    };
+    ESP_RETURN_ON_ERROR(
+        esp_lcd_new_panel_ili9488(s_io, &panel_cfg, s_bounce_px, &s_panel), TAG,
+        "new_panel_ili9488");
+
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel), TAG, "reset");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), TAG, "init");
+    /* ILI9488 の素の向きは 320x480（縦）。横長で使うので入れ替える。 */
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(s_panel, true), TAG, "swap_xy");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_panel, true, false), TAG, "mirror");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "disp_on");
+
+    ESP_RETURN_ON_ERROR(backlight_init(), TAG, "backlight_init");
+    ESP_RETURN_ON_ERROR(cdk_display_set_brightness(100), TAG, "brightness");
+    return ESP_OK;
 }
 
 static esp_err_t board_set_brightness(int percent)
 {
-    (void)percent;
-    return ESP_ERR_NOT_SUPPORTED;
+    if (percent < 0) {
+        percent = 0;
+    } else if (percent > 100) {
+        percent = 100;
+    }
+    const uint32_t max = (1u << BL_BITS) - 1u;
+    const uint32_t duty = (max * (uint32_t)percent) / 100u;
+    ESP_RETURN_ON_ERROR(ledc_set_duty(LEDC_LOW_SPEED_MODE, BL_CHANNEL, duty), TAG,
+                        "set_duty");
+    return ledc_update_duty(LEDC_LOW_SPEED_MODE, BL_CHANNEL);
 }
 
 #endif
@@ -98,6 +195,7 @@ esp_err_t cdk_display_init(cdk_display_info_t *info)
 
     /* バウンスバッファは内部 RAM の DMA 可能領域に置く。
      * 2 枚あるのは esp_lcd の転送が非同期だから（下の flush のコメント参照）。 */
+#if CDK_BOARD_HAS_BSP
     for (int i = 0; i < 2; i++) {
         s_bounce[i] = heap_caps_malloc(s_bounce_px * sizeof(uint16_t),
                                        MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
@@ -108,12 +206,13 @@ esp_err_t cdk_display_init(cdk_display_info_t *info)
         }
     }
     s_bounce_idx = 0;
+#endif
 
     if (info != NULL) {
         info->width = s_width;
         info->height = s_height;
     }
-    ESP_LOGI(TAG, "パネル %dx%d、バウンス %d 行 x2", s_width, s_height, BOUNCE_ROWS);
+    ESP_LOGI(TAG, "パネル %dx%d、帯 %d 行", s_width, s_height, BOUNCE_ROWS);
     return ESP_OK;
 }
 
@@ -147,24 +246,30 @@ esp_err_t cdk_display_flush(cdk_canvas_t *canvas)
         if (rows > BOUNCE_ROWS) {
             rows = BOUNCE_ROWS;
         }
-        const size_t n = (size_t)rows * (size_t)s_width;
         const uint16_t *src = canvas->pix + (size_t)y * (size_t)s_width;
 
         /* esp_lcd の転送は非同期だが、次の draw_bitmap がコマンドを送る前に
          * 必ず in-flight の転送を回収する（esp_lcd_panel_io_spi の実装）。
          * したがってバッファを 2 枚で交互に使えば、書き込もうとしている
          * バッファの転送は必ず完了している。 */
-        uint16_t *dst = s_bounce[s_bounce_idx];
-        s_bounce_idx ^= 1;
-
+#if CDK_BOARD_HAS_BSP
         /* ILI9342C はビッグエンディアンの RGB565 を期待する (BSP_LCD_BIGENDIAN)。
          * キャンバスはネイティブ（リトルエンディアン）なのでここで入れ替える。 */
+        uint16_t *dst = s_bounce[s_bounce_idx];
+        s_bounce_idx ^= 1;
+        const size_t n = (size_t)rows * (size_t)s_width;
         for (size_t i = 0; i < n; i++) {
             dst[i] = __builtin_bswap16(src[i]);
         }
-
+        const void *payload = dst;
+#else
+        /* ILI9488 はネイティブの RGB565 をそのまま受け取り、ドライバが
+         * RGB666 へ広げて送る。入れ替えもバウンスも要らないので、
+         * キャンバスの中を直接指す。 */
+        const void *payload = src;
+#endif
         const esp_err_t err =
-            esp_lcd_panel_draw_bitmap(s_panel, 0, y, s_width, y + rows, dst);
+            esp_lcd_panel_draw_bitmap(s_panel, 0, y, s_width, y + rows, payload);
         if (err != ESP_OK) {
             cdk_spibus_release();
             ESP_LOGE(TAG, "draw_bitmap に失敗 %s", esp_err_to_name(err));

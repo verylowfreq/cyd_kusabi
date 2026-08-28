@@ -1,3 +1,10 @@
 dependencies:
+  # 試作機 CoreS3 の BSP。v1 では使わないが、依存はプロジェクト全体で
+  # 1 つなので両方入れておく（数 KB なので分ける手間に見合わない）。
   espressif/m5stack_core_s3:
     version: "^2.0.0"
+  # ILI9488 の初期化列。転送は port_display が自前でやるので draw_bitmap は
+  # 呼ばない（あちらは 1 回ごとに DMA バッファを malloc し、失敗すると
+  # 無限ループする。DESIGN.md §14 の「動的確保は起動時のみ」に反する）。
+  atanisoft/esp_lcd_ili9488:
+    version: "^1.0.5"
