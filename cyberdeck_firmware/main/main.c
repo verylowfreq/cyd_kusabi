@@ -686,6 +686,16 @@ static void app_wifi_connect(void)
         return;
     }
 
+    /* すでに繋がっているなら「接続中...」を出さない。
+     * 出してから即「接続」と続くと、繋ぎ直したように見える。 */
+    if (cdk_wifi_ssid_is(s_wifi_ssid)) {
+        char now[20];
+        cdk_wifi_ip(now, sizeof(now));
+        term_printf("wifi  : \033[32m既に %s に接続しています (%s)\033[0m\r\n",
+                    s_wifi_ssid, now);
+        return;
+    }
+
     term_printf("wifi  : %s に接続中...\r\n", s_wifi_ssid);
 
     const esp_err_t err = cdk_wifi_connect(s_wifi_ssid, s_wifi_psk, 20000);

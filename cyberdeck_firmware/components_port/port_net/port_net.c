@@ -120,6 +120,24 @@ esp_err_t cdk_wifi_connect(const char *ssid, const char *psk, uint32_t timeout_m
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* **すでに同じ AP に繋がっているなら何もしない。**
+     *
+     * 接続中に esp_wifi_connect() を呼んでも新しい GOT_IP イベントは
+     * 上がらないので、待ち続けて必ずタイムアウトする。接続自体は生きて
+     * いるのに「失敗 ESP_ERR_TIMEOUT」と赤く出る、という紛らわしい状態に
+     * なっていた（人間の指摘）。
+     *
+     * SSID が違うときは繋ぎ直す。設定を変えて `wifi connect` したのに
+     * 前の AP に繋がったままだと、そちらのほうが分かりにくい。 */
+    if (cdk_wifi_ssid_is(ssid)) {
+        ESP_LOGI(TAG, "すでに %s に接続しています", ssid);
+        return ESP_OK;
+    }
+    if (s_connected) {
+        ESP_LOGI(TAG, "別の AP へ移ります");
+        (void)esp_wifi_disconnect();
+    }
+
     wifi_config_t wc = {0};
     strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
     if (psk != NULL) {
@@ -163,6 +181,20 @@ esp_err_t cdk_wifi_connect(const char *ssid, const char *psk, uint32_t timeout_m
     }
     ESP_LOGE(TAG, "接続がタイムアウトしました (%u ms)", (unsigned)timeout_ms);
     return ESP_ERR_TIMEOUT;
+}
+
+bool cdk_wifi_ssid_is(const char *ssid)
+{
+    if (!s_connected || ssid == NULL || ssid[0] == '\0') {
+        return false;
+    }
+    wifi_config_t cur = {0};
+    if (esp_wifi_get_config(WIFI_IF_STA, &cur) != ESP_OK) {
+        return false;
+    }
+    /* SSID は最大 32 バイトで、終端が無いこともある。 */
+    const size_t n = strnlen((const char *)cur.sta.ssid, sizeof(cur.sta.ssid));
+    return n == strlen(ssid) && strncmp((const char *)cur.sta.ssid, ssid, n) == 0;
 }
 
 bool cdk_wifi_is_connected(void)

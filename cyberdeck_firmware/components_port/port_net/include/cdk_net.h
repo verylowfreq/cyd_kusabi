@@ -32,6 +32,10 @@ void cdk_wifi_ip(char *out, size_t cap);
 /* 直近の切断理由コード（esp_wifi の wifi_err_reason_t）。0 なら未発生。 */
 int cdk_wifi_last_disconnect_reason(void);
 
+/* いまその SSID に繋がっているか。
+ * `wifi connect` を繰り返し叩いても無駄に繋ぎ直さないために使う。 */
+bool cdk_wifi_ssid_is(const char *ssid);
+
 /* ---------------- SSH ---------------- */
 
 typedef struct {
