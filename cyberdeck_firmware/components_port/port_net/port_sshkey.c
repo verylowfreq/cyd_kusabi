@@ -206,6 +206,40 @@ esp_err_t cdk_sshkey_info(const char *path, char *line, size_t line_cap, char *f
     }
     ret = derive_pub(&pk, NULL, line, line_cap, fp, fp_cap);
 
+    /* **ディスク上の .pub も読んで突き合わせる。**
+     * 認証で実際にサーバーへ出すのはこのファイルのほう（mbedTLS の
+     * 導出は RSA 専用なので `.pub` を渡している）。秘密鍵と食い違って
+     * いると、署名と提示鍵が別物になってサーバーは必ず拒否する。
+     * そのとき返るのは rc=-18 で、**「鍵が未登録」と区別がつかない**。 */
+    if (ret == ESP_OK) {
+        char pubpath[160];
+        snprintf(pubpath, sizeof(pubpath), "%s.pub", path);
+        FILE *pf = fopen(pubpath, "rb");
+        if (pf == NULL) {
+            ESP_LOGW(TAG, "%s がありません（ECDSA ではこれが無いと認証できません）",
+                     pubpath);
+        } else {
+            char onfile[512];
+            const size_t got = fread(onfile, 1, sizeof(onfile) - 1u, pf);
+            fclose(pf);
+            onfile[got] = '\0';
+            /* 末尾の改行を落としてから比べる */
+            size_t e = got;
+            while (e > 0 && (onfile[e - 1] == '\n' || onfile[e - 1] == '\r')) {
+                onfile[--e] = '\0';
+            }
+            ESP_LOGI(TAG, "onfile %s", onfile);
+            /* 行頭が一致すればよい（コメントは違ってよい） */
+            const char *sp = strrchr(line, ' ');
+            const size_t cmp_len = (sp != NULL) ? (size_t)(sp - line) : strlen(line);
+            if (strncmp(onfile, line, cmp_len) != 0) {
+                ESP_LOGE(TAG,
+                         "**%s の中身が秘密鍵と一致しません。**"
+                         "`ssh keygen -f` で作り直してください", pubpath);
+            }
+        }
+    }
+
 done:
     memset(pem, 0, PEM_CAP);
     free(pem);

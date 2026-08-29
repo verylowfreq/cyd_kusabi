@@ -27,6 +27,7 @@
 #include "cdk_shell.h"
 #include "cdk_skk.h"
 #include "cdk_skkdict_src.h"
+#include "cdk_retry.h"
 #include "cdk_status.h"
 #include "cdk_storage.h"
 #include "cdk_usbhid.h"
@@ -94,6 +95,23 @@ static cdk_skk_dict_t     s_skkdict;
  * 学習しないより、その場かぎりでも先頭に来るほうが打鍵が減る。 */
 static cdk_skk_user_entry_t s_skkuser_store[192];
 static cdk_skk_user_t       s_skkuser;
+
+/* いまの時刻 (ms)。再接続の間隔と USB のキーリピートで使う。 */
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* ---- 再接続 ----
+ * WiFi が切れたり相手が落ちたりしたときに繋ぎ直す。
+ * **リモートで `exit` したときは繋ぎ直さない**（抜けられなくなる）。
+ * どのキーでも中止できる。展示中に勝手に繋ぎ直し続けるのを止められないと困る。 */
+static cdk_retry_t s_retry;
+static bool        s_reconnect_enabled = true;
+
+#define RECONNECT_BASE_MS 1000u
+#define RECONNECT_CAP_MS  15000u
+#define RECONNECT_TRIES   8u
 
 static cdk_edit_t s_edit;
 static char      *s_edit_arena;
@@ -198,6 +216,16 @@ static void skk_commit(void *ctx, const char *utf8, size_t len)
 static void route_key(void *user, const cdk_key_t *k)
 {
     (void)user;
+
+    /* **どのキーでも再接続を中止する。** 展示中に勝手に繋ぎ直し続けるのを
+     * 止められないと困る。特定のキーにすると、そのキーを覚えていないと
+     * 止められない。 */
+    if (cdk_retry_active(&s_retry)) {
+        cdk_retry_stop(&s_retry);
+        term_printf("\033[33mssh   : 再接続をやめました\033[0m\r\n");
+        s_dirty = true;
+        return;
+    }
 
     /* 日本語入力はシェル / SSH の分岐より**前**に置く。ここを分岐の
      * 3 本目にすると「このキーは誰が受け取るのか」が追えなくなる。
@@ -554,6 +582,21 @@ void cdk_apply_keymap_setting(void)
 #endif
 }
 
+void cdk_apply_reconnect_setting(void)
+{
+    char buf[8];
+    s_reconnect_enabled = true; /* 既定は入り。持ち歩く機械なので切れやすい */
+    if (cdk_cfg_init() == ESP_OK &&
+        cdk_cfg_get(CDK_CFG_SSH_RECONNECT, buf, sizeof(buf)) == ESP_OK &&
+        buf[0] != '\0') {
+        s_reconnect_enabled = (strcmp(buf, "off") != 0);
+    }
+    if (!s_reconnect_enabled) {
+        cdk_retry_stop(&s_retry);
+    }
+    ESP_LOGI(TAG, "SSH の再接続 %s", s_reconnect_enabled ? "する" : "しない");
+}
+
 /* SSH の秘密鍵のパス。未設定なら SD の既定の場所。
  * ここを 1 か所にしておかないと、`ssh key` が見る場所と実際に使う場所が
  * ずれる（設定したのに効かない、という一番分かりにくい壊れ方になる）。 */
@@ -791,6 +834,7 @@ void app_main(void)
         }
     }
     cdk_apply_keymap_setting();
+    cdk_apply_reconnect_setting();
 #endif
     ESP_LOGI(TAG, "ガンマ補正 %u/10", (unsigned)s_screen.gamma_x10);
 
@@ -913,15 +957,25 @@ void app_main(void)
 #if CDK_BOARD_HAS_USB_HOST
         /* USB キーボード。**route_key はここ（メインループ）からしか呼ばない。**
          * 端末・画面・SKK・SSH を触るので、USB のタスクから直接呼ぶと壊れる。 */
-        cdk_usbhid_poll(route_key, NULL,
-                        (uint32_t)(esp_timer_get_time() / 1000));
+        cdk_usbhid_poll(route_key, NULL, now_ms());
 #endif
 
         /* SSH の受信をそのまま端末へ流す。DESIGN.md §8.2 の通り
          * 専用タスクは作らず、メインループが両方を見る。 */
         if (s_session == SESSION_SSH) {
             if (!cdk_ssh_is_open()) {
-                term_printf("\r\n\033[31mssh   : 切断されました\033[0m\r\n");
+                const cdk_ssh_disconnect_t why = cdk_ssh_disconnect_reason();
+                /* **通信断のときだけ繋ぎ直す。** リモートで exit したのに
+                 * 繋ぎ直されると、抜ける手段が無くなる。 */
+                if (s_reconnect_enabled && why == CDK_SSH_DISCONNECT_ERROR) {
+                    term_printf("\r\n\033[33mssh   : 切断されました。"
+                                "繋ぎ直します（どれかキーで中止）\033[0m\r\n");
+                    cdk_retry_init(&s_retry, RECONNECT_BASE_MS, RECONNECT_CAP_MS,
+                                   RECONNECT_TRIES);
+                    cdk_retry_begin(&s_retry, now_ms());
+                } else {
+                    term_printf("\r\n\033[31mssh   : 切断されました\033[0m\r\n");
+                }
                 enter_shell();
             } else {
                 uint8_t rx[512];
@@ -933,6 +987,22 @@ void app_main(void)
                         continue;
                     }
                     break;
+                }
+            }
+        }
+
+        /* 再接続。**待っている間もシェルは普通に使える。**
+         * 画面を占有して待たせると、設定を直すこともできない。 */
+        if (cdk_retry_active(&s_retry) && cdk_retry_due(&s_retry, now_ms())) {
+            term_printf("\033[33mssh   : 再接続 %u 回目...\033[0m\r\n",
+                        (unsigned)cdk_retry_next_attempt(&s_retry));
+            if (cdk_wifi_is_connected() && app_ssh_open()) {
+                cdk_retry_stop(&s_retry);
+            } else {
+                cdk_retry_failed(&s_retry, now_ms());
+                if (cdk_retry_exhausted(&s_retry)) {
+                    term_printf("\033[31mssh   : 繋ぎ直せませんでした。"
+                                "`ssh` でやり直せます\033[0m\r\n");
                 }
             }
         }

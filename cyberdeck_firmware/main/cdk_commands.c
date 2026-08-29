@@ -183,6 +183,9 @@ static int cmd_set(int argc, char **argv, void *user)
     if (strcmp(argv[1], CDK_CFG_KEYMAP) == 0) {
         cdk_apply_keymap_setting();
     }
+    if (strcmp(argv[1], CDK_CFG_SSH_RECONNECT) == 0) {
+        cdk_apply_reconnect_setting();
+    }
     /* 拡大率だけは再起動が要る。桁数と行数が変わるので端末を作り直す
      * 必要があり、その場でやると画面の中身が消える。**黙って効かないより、
      * 効かないと言うほうがいい。** */

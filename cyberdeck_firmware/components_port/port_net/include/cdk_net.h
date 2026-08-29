@@ -77,6 +77,17 @@ esp_err_t cdk_ssh_resize(int cols, int rows);
 
 void cdk_ssh_close(void);
 
+/* 切れた理由。**自動再接続してよいかの判断に使う。**
+ * リモートで `exit` を打ったのに繋ぎ直されると、抜けられなくなる。 */
+typedef enum {
+    CDK_SSH_DISCONNECT_NONE = 0,
+    CDK_SSH_DISCONNECT_EOF,   /* リモートが閉じた（exit）。繋ぎ直さない */
+    CDK_SSH_DISCONNECT_ERROR, /* 通信が切れた。繋ぎ直してよい */
+    CDK_SSH_DISCONNECT_LOCAL  /* こちらから閉じた。繋ぎ直さない */
+} cdk_ssh_disconnect_t;
+
+cdk_ssh_disconnect_t cdk_ssh_disconnect_reason(void);
+
 /* ---------------- SSH の鍵 ---------------- */
 
 /* 実機で ECDSA P-256 の鍵を作り、PEM を path に、公開鍵 1 行を

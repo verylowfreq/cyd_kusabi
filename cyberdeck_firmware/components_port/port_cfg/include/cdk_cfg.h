@@ -36,6 +36,9 @@ extern "C" {
 /* SSH の秘密鍵。未設定なら /sdcard/id_ecdsa を使う。
  * **ed25519 は使えない**（mbedTLS バックエンドの libssh2 が非対応）。 */
 #define CDK_CFG_SSH_KEY   "ssh.key"
+/* 通信が切れたときに繋ぎ直すか。"on"（既定）か "off"。
+ * リモートで exit したときは、この設定に関わらず繋ぎ直さない。 */
+#define CDK_CFG_SSH_RECONNECT "ssh.recon"
 
 /* NVS を初期化する。何度呼んでもよい。 */
 esp_err_t cdk_cfg_init(void);

@@ -27,6 +27,7 @@ set(CDK_CORE_MODULES
     cdk_hid
     cdk_status
     cdk_sshkey
+    cdk_retry
     cdk_shell
     cdk_screen
     cdk_skk
@@ -80,6 +81,7 @@ set(CDK_TESTS
     test_hid
     test_status
     test_sshkey
+    test_retry
     test_shell
     test_screen
     test_skk_romkana

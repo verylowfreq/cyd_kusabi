@@ -50,6 +50,9 @@ void cdk_apply_keymap_setting(void);
  * **唯一の出どころ。** `ssh key` が見る場所と認証で使う場所を
  * 一致させるため、両方ここを呼ぶ。 */
 const char *cdk_ssh_key_path(void);
+
+/* NVS の ssh.recon を反映する。`set ssh.recon off` から呼ぶ。 */
+void cdk_apply_reconnect_setting(void);
 bool cdk_edit_file_load(cdk_edit_t *e, const char *path);
 bool cdk_edit_file_save(cdk_edit_t *e);
 

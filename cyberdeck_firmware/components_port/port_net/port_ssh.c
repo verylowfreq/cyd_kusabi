@@ -32,6 +32,7 @@ static bool               s_open;
 static bool               s_lib_inited;
 static char               s_fingerprint[64];
 static cdk_hostkey_result_t s_hostkey_result = CDK_HOSTKEY_UNVERIFIED;
+static cdk_ssh_disconnect_t s_disconnect = CDK_SSH_DISCONNECT_NONE;
 
 static void log_fingerprint(void)
 {
@@ -126,6 +127,11 @@ void cdk_ssh_close(void)
     if (s_sock >= 0) {
         close(s_sock);
         s_sock = -1;
+    }
+    /* **こちらから閉じたときは繋ぎ直さない。** 通信断で閉じた場合は
+     * すでに read/write 側が理由を入れているので、そちらを消さない。 */
+    if (s_open) {
+        s_disconnect = CDK_SSH_DISCONNECT_LOCAL;
     }
     s_open = false;
 }
@@ -288,6 +294,7 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
     fcntl(s_sock, F_SETFL, flags | O_NONBLOCK);
 
     s_open = true;
+    s_disconnect = CDK_SSH_DISCONNECT_NONE;
     ESP_LOGI(TAG, "%s@%s に接続しました", cfg->user, cfg->host);
     return ESP_OK;
 }
@@ -319,14 +326,23 @@ int cdk_ssh_read(uint8_t *buf, size_t cap)
     if (n < 0) {
         ESP_LOGW(TAG, "読み取りエラー rc=%d", (int)n);
         s_open = false;
+        s_disconnect = CDK_SSH_DISCONNECT_ERROR;
         return -1;
     }
     if (n == 0 && libssh2_channel_eof(s_channel)) {
+        /* リモートが正常に閉じた（`exit` を打った）。**繋ぎ直さない。**
+         * 抜けたつもりが勝手に入り直されると、抜ける手段が無くなる。 */
         ESP_LOGI(TAG, "リモートがセッションを閉じました");
         s_open = false;
+        s_disconnect = CDK_SSH_DISCONNECT_EOF;
         return -1;
     }
     return (int)n;
+}
+
+cdk_ssh_disconnect_t cdk_ssh_disconnect_reason(void)
+{
+    return s_disconnect;
 }
 
 int cdk_ssh_write(const uint8_t *buf, size_t len)
