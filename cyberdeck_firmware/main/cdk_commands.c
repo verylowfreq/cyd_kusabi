@@ -214,6 +214,13 @@ static int cmd_wifi(int argc, char **argv, void *user)
     return 1;
 }
 
+/* 公開鍵の 1 行は 200 バイト前後ある。**スタックに積まない。**
+ * シェルはメインループからしか動かないので static でよい。
+ * メインタスクのスタックは libssh2 と mbedTLS が食うので、
+ * こちらは削れるだけ削る（不具合 #40）。 */
+static char s_key_line[512];
+static char s_key_fp[80];
+
 static int cmd_ssh(int argc, char **argv, void *user)
 {
     app_ctx_t *ctx = ctx_of(user);
@@ -224,6 +231,58 @@ static int cmd_ssh(int argc, char **argv, void *user)
         cdk_shell_write(sh, "切断しました\r\n");
         return 0;
     }
+
+    /* 鍵の状態を見る。パスは cdk_ssh_key_path() が唯一の出どころなので、
+     * ここで見る場所と実際に認証で使う場所は必ず一致する。 */
+    if (argc >= 2 && strcmp(argv[1], "key") == 0) {
+        const char *path = cdk_ssh_key_path();
+        const esp_err_t err = cdk_sshkey_info(path, s_key_line, sizeof(s_key_line), s_key_fp, sizeof(s_key_fp));
+        if (err == ESP_ERR_NOT_FOUND) {
+            cdk_shell_printf(sh, "%s はありません。`ssh keygen` で作れます\r\n", path);
+            return 1;
+        }
+        if (err != ESP_OK) {
+            cdk_shell_printf(sh,
+                             "\033[31m%s を鍵として読めません\033[0m\r\n"
+                             "  PEM 形式の RSA か ECDSA のみ。"
+                             "\033[33med25519 は使えません\033[0m\r\n",
+                             path);
+            return 1;
+        }
+        cdk_shell_printf(sh, "鍵    : %s\r\n指紋  : %s\r\n%s\r\n", path, s_key_fp, s_key_line);
+        return 0;
+    }
+
+    if (argc >= 2 && strcmp(argv[1], "keygen") == 0) {
+        const char *path = cdk_ssh_key_path();
+
+        /* 上書きは黙ってやらない。鍵を消すと入れなくなる。 */
+        if (cdk_sshkey_info(path, s_key_line, sizeof(s_key_line), s_key_fp, sizeof(s_key_fp)) == ESP_OK &&
+            !(argc >= 3 && strcmp(argv[2], "-f") == 0)) {
+            cdk_shell_printf(sh,
+                             "\033[33m%s は既にあります\033[0m\r\n"
+                             "  上書きするなら ssh keygen -f\r\n",
+                             path);
+            return 1;
+        }
+
+        cdk_shell_write(sh, "ECDSA P-256 の鍵を作っています...\r\n");
+        if (cdk_sshkey_generate(path, "cyberdeck", s_key_line,
+                                sizeof(s_key_line), s_key_fp, sizeof(s_key_fp)) != ESP_OK) {
+            cdk_shell_write(sh, "\033[31m鍵を作れませんでした（SD は挿さっていますか）\033[0m\r\n");
+            return 1;
+        }
+        cdk_shell_printf(sh,
+                         "鍵    : %s\r\n指紋  : %s\r\n\r\n"
+                         "下の 1 行を接続先の ~/.ssh/authorized_keys に貼ってください:\r\n"
+                         "\033[36m%s\033[0m\r\n",
+                         path, s_key_fp, s_key_line);
+        /* FAT には権限が無い。カードを抜けば誰でも読める。 */
+        cdk_shell_write(sh,
+                        "\033[33m注意: SD に権限は無いので、カードを抜けば秘密鍵は読めます\033[0m\r\n");
+        return 0;
+    }
+
     if (!cdk_wifi_is_connected()) {
         cdk_shell_write(sh, "\033[31mWiFi が繋がっていません\033[0m\r\n");
         return 1;
@@ -404,7 +463,7 @@ const cdk_shell_cmd_t APP_COMMANDS[] = {
     {"free",    "ヒープの空き",                           cmd_free},
     {"set",     "設定の表示と変更 (set <key> <value>)",   cmd_set},
     {"wifi",    "WiFi の状態と接続 (wifi connect)",       cmd_wifi},
-    {"ssh",     "SSH に入る / 切る (ssh close)",          cmd_ssh},
+    {"ssh",     "SSH (ssh close|key|keygen)",             cmd_ssh},
     {"gpio",    "GPIO の mode / set / get",               cmd_gpio},
     {"adc",     "ADC1 を読む (adc read <ch>)",            cmd_adc},
     {"i2c",     "I2C を走査 (i2c scan <sda> <scl>)",      cmd_i2c},

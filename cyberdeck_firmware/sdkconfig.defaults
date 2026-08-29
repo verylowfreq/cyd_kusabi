@@ -40,7 +40,12 @@ CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
 CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
 
 # --- スタック ---
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# **公開鍵認証を足したら 8192 では溢れた**（不具合 #40）。libssh2 が
+# PEM を読んで EC の署名をするところがメインタスクの上で走るため。
+# 症状は「SSH に入ろうとすると再起動」で、ログに
+#   ***ERROR*** A stack overflow in task main has been detected.
+# が出る。余裕は決め打ちにせず、接続後に実測して `info` に出している。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # --- FATFS / microSD（DESIGN.md §10） ---
 # 既定は CONFIG_FATFS_LFN_NONE で、8.3 の短縮名しか扱えない。

@@ -45,6 +45,11 @@ void cdk_apply_gamma_setting(void);
 /* NVS の "keymap"（us / jis）を USB キーボードに反映する。
  * `set keymap jis` から呼ぶので、焼き直さずに切り替えられる。 */
 void cdk_apply_keymap_setting(void);
+
+/* SSH の秘密鍵のパス（NVS の ssh.key、無ければ SD の既定）。
+ * **唯一の出どころ。** `ssh key` が見る場所と認証で使う場所を
+ * 一致させるため、両方ここを呼ぶ。 */
+const char *cdk_ssh_key_path(void);
 bool cdk_edit_file_load(cdk_edit_t *e, const char *path);
 bool cdk_edit_file_save(cdk_edit_t *e);
 

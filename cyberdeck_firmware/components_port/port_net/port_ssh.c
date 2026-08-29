@@ -12,6 +12,8 @@
 #include "cdk_knownhosts.h"
 
 #include "esp_log.h"
+
+#include <stdio.h>
 #include "libssh2.h"
 
 #include <errno.h>
@@ -187,7 +189,51 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
     ESP_LOGI(TAG, "サーバーが提示する認証方式: %s", (methods != NULL) ? methods : "(取得失敗)");
 
     rc = LIBSSH2_ERROR_AUTHENTICATION_FAILED;
-    if (methods != NULL && strstr(methods, "password") != NULL) {
+
+    /* **公開鍵を先に試す。** パスワードより先にするのは、鍵を置いたのに
+     * 黙ってパスワードで入っていた、という状態を作らないため。
+     *
+     * **`.pub` を必ず渡す。** mbedTLS バックエンドで秘密鍵から公開鍵を
+     * 導出する経路 (`_libssh2_mbedtls_pub_priv_key`) は **RSA しか
+     * 受け付けない**（`MBEDTLS_PK_RSA` 以外は "Key type not supported"）。
+     * 一方 ECDSA の署名と秘密鍵の読み込みは実装されているので、
+     * 公開鍵を外から渡せば ECDSA でも通る。
+     *
+     * NULL を渡して ECDSA の鍵を使うと `rc=-16` で落ちる。これは
+     * 「鍵が未登録」と区別がつかないので、原因の分からない失敗になる
+     * （実機で踏んだ）。 */
+    if (cfg->key_path != NULL && cfg->key_path[0] != '\0' && methods != NULL &&
+        strstr(methods, "publickey") != NULL) {
+        char pubpath[160];
+        snprintf(pubpath, sizeof(pubpath), "%s.pub", cfg->key_path);
+
+        /* `.pub` が無ければ NULL で導出に賭ける（RSA ならそれで通る）。 */
+        const char *pub = NULL;
+        FILE       *pf = fopen(pubpath, "rb");
+        if (pf != NULL) {
+            fclose(pf);
+            pub = pubpath;
+        } else {
+            ESP_LOGW(TAG, "%s がありません。RSA 以外はこれが無いと通りません",
+                     pubpath);
+        }
+
+        rc = libssh2_userauth_publickey_fromfile_ex(
+            s_session, cfg->user, (unsigned int)strlen(cfg->user), pub,
+            cfg->key_path, cfg->key_pass);
+        if (rc == 0) {
+            ESP_LOGI(TAG, "公開鍵で認証しました (%s)", cfg->key_path);
+        } else {
+            /* **ここで諦めない。** 鍵が authorized_keys に入っていないのは
+             * 普通に起きる。パスワードへ落ちる。 */
+            char *msg = NULL;
+            libssh2_session_last_error(s_session, &msg, NULL, 0);
+            ESP_LOGW(TAG, "公開鍵認証に失敗 rc=%d (%s)。パスワードを試します", rc,
+                     (msg != NULL) ? msg : "?");
+        }
+    }
+
+    if (rc != 0 && methods != NULL && strstr(methods, "password") != NULL) {
         rc = libssh2_userauth_password(s_session, cfg->user, cfg->password);
         if (rc != 0) {
             ESP_LOGW(TAG, "password 認証に失敗 rc=%d", rc);

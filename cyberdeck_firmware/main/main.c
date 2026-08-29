@@ -554,6 +554,22 @@ void cdk_apply_keymap_setting(void)
 #endif
 }
 
+/* SSH の秘密鍵のパス。未設定なら SD の既定の場所。
+ * ここを 1 か所にしておかないと、`ssh key` が見る場所と実際に使う場所が
+ * ずれる（設定したのに効かない、という一番分かりにくい壊れ方になる）。 */
+const char *cdk_ssh_key_path(void)
+{
+    static char path[96];
+    if (cdk_cfg_init() == ESP_OK &&
+        cdk_cfg_get(CDK_CFG_SSH_KEY, path, sizeof(path)) == ESP_OK &&
+        path[0] != '\0') {
+        return path;
+    }
+    strncpy(path, "/sdcard/id_ecdsa", sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+    return path;
+}
+
 static void load_config(void)
 {
     if (cdk_cfg_init() != ESP_OK) {
@@ -620,6 +636,9 @@ static bool app_ssh_open(void)
         .term = "xterm-256color",
         .cols = s_term.cols,
         .rows = s_term.rows,
+        /* 鍵が無ければ port 層が黙って飛ばす。あればパスワードより先に試す。 */
+        .key_path = cdk_ssh_key_path(),
+        .key_pass = NULL,
     };
 
     const esp_err_t err = cdk_ssh_connect(&cfg);
@@ -627,7 +646,11 @@ static bool app_ssh_open(void)
         term_printf("\033[31mssh   : 接続失敗 %s\033[0m\r\n", esp_err_to_name(err));
         return false;
     }
-    ESP_LOGI(TAG, "SSH 接続完了。以降の画面はリモートの出力。");
+    /* **スタックの余裕を実測して残す。** 公開鍵認証を足したときに
+     * メインタスクが溢れた（#40）。ここが libssh2 と mbedTLS の
+     * ピークなので、数えるならこの直後。 */
+    ESP_LOGI(TAG, "SSH 接続完了。メインタスクのスタック残り %u バイト",
+             (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
     enter_ssh();
     return true;
 }
