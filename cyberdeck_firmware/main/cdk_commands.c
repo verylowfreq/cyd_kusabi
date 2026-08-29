@@ -150,7 +150,25 @@ static int cmd_set(int argc, char **argv, void *user)
             char buf[128];
             const bool has = cdk_cfg_get(keys[i], buf, sizeof(buf)) == ESP_OK;
             if (!has || buf[0] == '\0') {
-                cdk_shell_printf(sh, "  %-10s \033[90m(未設定)\033[0m\r\n", keys[i]);
+                /* **未設定でも既定が効くものは、その値を出す。**
+                 * 「(未設定)」だけだと、設定しないと動かないのか、
+                 * 既定で動いているのかが読み取れない。 */
+                const char *dflt = NULL;
+                if (strcmp(keys[i], CDK_CFG_SSH_KEY) == 0) {
+                    dflt = cdk_ssh_key_path();
+                } else if (strcmp(keys[i], CDK_CFG_SSH_RECONNECT) == 0) {
+                    dflt = "on";
+                } else if (strcmp(keys[i], CDK_CFG_FONTSCALE) == 0) {
+                    dflt = "1";
+                } else if (strcmp(keys[i], CDK_CFG_STATUSBAR) == 0) {
+                    dflt = "off";
+                }
+                if (dflt != NULL) {
+                    cdk_shell_printf(sh, "  %-10s \033[90m%s (既定)\033[0m\r\n",
+                                     keys[i], dflt);
+                } else {
+                    cdk_shell_printf(sh, "  %-10s \033[90m(未設定)\033[0m\r\n", keys[i]);
+                }
             } else if (cdk_cfg_is_secret(keys[i])) {
                 /* パスワードは伏せる。ただし「設定されている」ことと桁数は出す。
                  * 全部隠すと設定できているのか分からず、かえって危ない。 */

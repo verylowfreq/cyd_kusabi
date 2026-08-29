@@ -40,6 +40,13 @@ extern "C" {
  * リモートで exit したときは、この設定に関わらず繋ぎ直さない。 */
 #define CDK_CFG_SSH_RECONNECT "ssh.recon"
 
+/* secrets.h の種を撒いたことを覚えておく印。**`set` の一覧には出さない**
+ * （設定ではなく内部の記録なので、並べても混乱するだけ）。
+ *
+ * これが無いと、`set ssh.pass ""` で消したパスワードが次の起動で
+ * secrets.h から書き戻されて復活する。 */
+#define CDK_CFG_SEEDED    "seeded"
+
 /* NVS を初期化する。何度呼んでもよい。 */
 esp_err_t cdk_cfg_init(void);
 

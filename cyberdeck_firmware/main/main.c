@@ -533,6 +533,39 @@ static void cfg_or_seed(const char *key, const char *seed, char *buf, size_t cap
     buf[cap - 1] = '\0';
 }
 
+/* NVS から読むだけ。無ければ空にする。 */
+static void cfg_load(const char *key, char *buf, size_t cap)
+{
+    if (cdk_cfg_get(key, buf, cap) != ESP_OK) {
+        buf[0] = '\0';
+    }
+}
+
+/* 一度でも設定されたことがあるか。
+ *
+ * **`set ssh.pass ""` が効かない原因がここだった。** 空文字を渡すと
+ * NVS のキーは消える。すると次の load_config が「未設定」と見なして
+ * secrets.h の種を書き戻し、**消したはずのパスワードが復活する**。
+ * つまり認証情報を消す手段が無かった。
+ *
+ * 種を撒くのは本当に初回だけにする。判定は「設定キーが 1 つでもあるか」。
+ * 一度でも使われた機械なら、いまの中身がその人の意思。 */
+static bool cfg_configured(void)
+{
+    char mark[8];
+    if (cdk_cfg_get(CDK_CFG_SEEDED, mark, sizeof(mark)) == ESP_OK) {
+        return true;
+    }
+    const char *const *keys = cdk_cfg_keys();
+    char               buf[128];
+    for (size_t i = 0; keys[i] != NULL; i++) {
+        if (cdk_cfg_get(keys[i], buf, sizeof(buf)) == ESP_OK) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void cdk_apply_gamma_setting(void)
 {
     char buf[16];
@@ -619,11 +652,25 @@ static void load_config(void)
         ESP_LOGE(TAG, "設定を読めません");
         return;
     }
-    cfg_or_seed(CDK_CFG_WIFI_SSID, CDK_WIFI_SSID, s_wifi_ssid, sizeof(s_wifi_ssid));
-    cfg_or_seed(CDK_CFG_WIFI_PSK, CDK_WIFI_PSK, s_wifi_psk, sizeof(s_wifi_psk));
-    cfg_or_seed(CDK_CFG_SSH_HOST, CDK_SSH_HOST, s_ssh_host, sizeof(s_ssh_host));
-    cfg_or_seed(CDK_CFG_SSH_USER, CDK_SSH_USER, s_ssh_user, sizeof(s_ssh_user));
-    cfg_or_seed(CDK_CFG_SSH_PASS, CDK_SSH_PASS, s_ssh_pass, sizeof(s_ssh_pass));
+    if (!cfg_configured()) {
+        /* 本当の初回だけ secrets.h の種を撒く。 */
+        cfg_or_seed(CDK_CFG_WIFI_SSID, CDK_WIFI_SSID, s_wifi_ssid, sizeof(s_wifi_ssid));
+        cfg_or_seed(CDK_CFG_WIFI_PSK, CDK_WIFI_PSK, s_wifi_psk, sizeof(s_wifi_psk));
+        cfg_or_seed(CDK_CFG_SSH_HOST, CDK_SSH_HOST, s_ssh_host, sizeof(s_ssh_host));
+        cfg_or_seed(CDK_CFG_SSH_USER, CDK_SSH_USER, s_ssh_user, sizeof(s_ssh_user));
+        cfg_or_seed(CDK_CFG_SSH_PASS, CDK_SSH_PASS, s_ssh_pass, sizeof(s_ssh_pass));
+        (void)cdk_cfg_set(CDK_CFG_SEEDED, "1");
+        ESP_LOGI(TAG, "secrets.h の値を NVS へ書きました（初回のみ）");
+        return;
+    }
+
+    /* 2 回目以降は読むだけ。**空にしたものは空のまま。**
+     * ここで種を撒き直すと `set ssh.pass ""` が効かない。 */
+    cfg_load(CDK_CFG_WIFI_SSID, s_wifi_ssid, sizeof(s_wifi_ssid));
+    cfg_load(CDK_CFG_WIFI_PSK, s_wifi_psk, sizeof(s_wifi_psk));
+    cfg_load(CDK_CFG_SSH_HOST, s_ssh_host, sizeof(s_ssh_host));
+    cfg_load(CDK_CFG_SSH_USER, s_ssh_user, sizeof(s_ssh_user));
+    cfg_load(CDK_CFG_SSH_PASS, s_ssh_pass, sizeof(s_ssh_pass));
 }
 
 static void app_wifi_connect(void)
