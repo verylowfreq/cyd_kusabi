@@ -345,23 +345,35 @@ static bool key_direct(cdk_skk_t *s, const cdk_key_t *k)
         return true;
     }
 
-    /* モード切り替え。未確定のローマ字が無いときだけ効く。
-     * "l" は "らりるれろ" の途中にも出るので、pending があるなら文字扱い。 */
-    if (cdk_skk_romkana_pending(&s->rk)[0] == '\0') {
-        if (c == 'q') {
+    /* モード切り替え。**打ちかけのローマ字があっても必ず効く。**
+     *
+     * 以前は「未確定が無いときだけ」にしていたが、それだと抜けられなくなる。
+     * `nihon` の直後は末尾の n が残っているので `l` が文字として扱われ、
+     * その `l` がまた未確定になる。次の `l` は `ll` = っ になり、
+     * **押すほど抜けられない**（実機で踏んだ）。
+     *
+     * SKK 本来の作法でも `l` は英数へ戻すためだけのキー。小書き文字は
+     * `x` 系（`xa` → ぁ）が持っているので、`l` に文字の役目は要らない。
+     * ローマ字表からも `l*` と `q*` を外してある。 */
+    if (c == 'q' || c == 'l' || c == 'L' || c == '/') {
+        /* 打ちかけを先に吐き出す。捨てると打った文字が消えたように見える。 */
+        char         out[32];
+        const size_t n = cdk_skk_romkana_flush(&s->rk, out, sizeof(out));
+        if (n > 0) {
+            emit_kana(s, out, n);
+        }
+        switch (c) {
+        case 'q':
             s->mode = (s->mode == CDK_SKK_KATAKANA) ? CDK_SKK_HIRAGANA
                                                     : CDK_SKK_KATAKANA;
             return true;
-        }
-        if (c == 'l') {
+        case 'l':
             s->mode = CDK_SKK_ASCII;
             return true;
-        }
-        if (c == 'L') {
+        case 'L':
             s->mode = CDK_SKK_ZENEI;
             return true;
-        }
-        if (c == '/') {
+        default: /* '/' */
             s->state = CDK_SKK_ST_MIDASHI;
             s->abbrev = true;
             return true;

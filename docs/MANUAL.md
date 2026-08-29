@@ -82,13 +82,12 @@ L        全角英数
 
 いまのモードは画面下の帯に `あ` `ア` `ｱ` `Ａ` で出る。英数のときは何も出ない。
 
-> **モードを変えるキーは、打ちかけのローマ字が残っていると効かない。**
-> たとえば `nihon` と打った直後は末尾の `n` が「な行かもしれない」状態で
-> 残っているので、そこで `l` を押しても英数に戻らず、`l` が新しい打ちかけに
-> なる。もう一度 `l` を押すと `ll` = `っ` が出てしまい、**押すほど抜けられない。**
->
-> **`BS` を 1 回押してから `l`。** `BS` が打ちかけを消すので、そのあとなら効く。
-> 確実なのは、いったん `Enter` か `Space` で区切ってから押すこと。
+モードを変えるキーは**打ちかけのローマ字が残っていても効く**。
+たとえば `nihon` と打った直後は末尾の `n` が残っているが、そこで `l` を
+押せば `ん` を出しきってから英数に戻る。打った字が消えることはない。
+
+小書き文字は `x` 系（`xa` → ぁ、`xtu` → っ）、`くぁ` は `kw` 系（`kwa`）。
+**`l` と `q` は文字を打つのには使わない。**
 
 ### 漢字にする
 
@@ -320,7 +319,7 @@ reboot
 |---|---|
 | 記号だけ違う字が出る | キー配列（→ 2 章） |
 | 画面が暗くて読めない | `set gamma 26` |
-| かな入力から抜けられない | **`BS` を押してから `l`**（→ 3 章）。`l` の連打では抜けられない |
+| かな入力から抜けられない | `l`（小文字のエル）。打ちかけがあっても効く |
 | SSH に入れない | `wifi status` で IP が出ているか。`info` で状態を見る |
 | 公開鍵で入れない | 接続先の `authorized_keys`（→ 6 章） |
 | ホスト鍵が違うと言われる | 接続先を作り直したなら `hostkey forget` |
@@ -344,24 +343,92 @@ reboot
 - **USB キーボードは 1 台だけ。** ハブ経由や複数台は試していない。
 - **再接続の中止（キーを押して止める）は実機で通していない。**
   相手が生きていると 1 回目で繋がってしまい、試す機会が無かった。
-- **`l` でかな入力から抜けにくい。** ローマ字表で `l` が小書き文字の前置き
-  (`la` → ぁ、`ll` → っ) を兼ねているため、打ちかけがあると文字として扱われる。
-  同じ役割は `x` (`xa` → ぁ) も持っているので `l` は重複しており、
-  本来の SKK では `l` は英数へ戻すためだけのキー。**直せる不具合**だが、
-  いまは `BS` を挟む運用で回避している。
+
+---
+
+## 11. ファームウェアを更新する
+
+### 用意するもの
+
+- **ESP-IDF v5.5.5**（他の版では試していない）
+- USB ケーブル 2 本。**用途が違うので両方挿す**
+
+| 口 | 何に使うか | 例 |
+|---|---|---|
+| UART0 | **書き込み**とログ | COM76 |
+| UART1 | 画面の取得などの制御 | COM75 |
+
+> **USB-OTG の口は書き込みに使えない。** そこはキーボード専用。
+> ESP32-S3 の USB は 1 組しかなく、この機械はホスト側で使い切っている。
+
+### ビルドと書き込み
+
+PowerShell で ESP-IDF を有効にしてから、`tools/cdk.py` を使う。
+
+```powershell
+cd cyberdeck_firmware
+. C:\DATA-0\Espressif\esp-idf-v5.5.5\export.ps1
+
+python tools\cdk.py build --board v1     # ビルド（この機械は v1）
+python tools\cdk.py flash                # 書き込む
+python tools\cdk.py boot                 # リセットして起動ログを見る
+```
+
+`--board` を付けると `.cdk_board` に覚えるので、次からは `build` だけでよい。
+以降 `flash` や `boot` はポートを自動で選ぶ。
+
+> **基板を変えるときは `sdkconfig` を消す。** ESP-IDF は既存の
+> `sdkconfig` を defaults より優先するので、消さないと前の基板の設定が残る
+> （PSRAM のモードが違うと起動時に必ず落ちる）。
+> `cdk.py build --board` が自動で消すので、手で `idf.py` を叩くときだけ注意。
+
+### うまくいかないとき
+
+| 症状 | 見るところ |
+|---|---|
+| `flash` がポートを開けない | ケーブルと COM 番号。`python tools\cdk.py --prog COM76 flash` のように明示できる（`--prog` `--ctrl` `--log` は**サブコマンドの前**に置く） |
+| 書けたのに起動ログが出ない | ログは UART0。制御用の口を見ていないか |
+| 起動直後に落ちる | 基板違い。`sdkconfig` を消して `build --board v1` から |
+
+### 動いているか確かめる
+
+```powershell
+python tools\cdk.py selftest
+```
+
+リセット → 疎通確認 → **画面を取得して PC 側で描いた基準画像と 1 バイト単位で
+比べる**、までを自動でやる。`検証 OK` が出れば、表示まで含めて壊れていない。
+
+### 辞書を入れ直す
+
+SKK の辞書はファームとは別のパーティションにある。普段は焼き直さなくてよい。
+
+```powershell
+python tools\cdk.py dict SKK-JISYO.L.unannotated
+```
 
 ---
 
 ## 付録: 開発者向け
 
 PC から操作する道具は `cyberdeck_firmware/tools/cdk.py`。
+**どのコマンドも必ず有限時間で終わる**（`idf.py monitor` は使わない）。
 
 ```
-python tools/cdk.py boot                    リセットして起動ログを取る
+python tools/cdk.py log --timeout 5         ログを 5 秒ぶん読む
+python tools/cdk.py ping                    制御チャネルの疎通確認
 python tools/cdk.py shot out.png --verify   画面を取得して基準画像と比べる
 python tools/cdk.py type "ls\n"             文字を流し込む
+python tools/cdk.py key ctrl+j              キーを 1 つ送る
 python tools/cdk.py cam out.jpg             パネルをカメラで撮る
-python tools/cdk.py selftest                boot + ping + 画面の照合
+```
+
+ホスト側のテスト（実機は要らない）:
+
+```powershell
+cmake -S host -B build-host -G Ninja -DCMAKE_C_COMPILER=clang
+ninja -C build-host
+ctest --test-dir build-host
 ```
 
 設計の意図と経緯は `DESIGN.md`、基板は `HARDWARE_DESIGN.md`、

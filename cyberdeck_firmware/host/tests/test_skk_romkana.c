@@ -91,8 +91,19 @@ static void test_basic(void)
     T_CASE("小書き");
     T_EQ_STR(type("xa"), "ぁ");
     T_EQ_STR(type("xtu"), "っ");
-    T_EQ_STR(type("ltu"), "っ");
     T_EQ_STR(type("xya"), "ゃ");
+
+    T_CASE("l と q は綴りに使わない");
+    /* **意図的に外した。** `l` は英数へ戻すキー、`q` はカタカナ切り替えで、
+     * 文字の役目を兼ねると打ちかけが残ったときにモードを変えられなくなる
+     * （`l` がまた打ちかけになり、次の `l` が `ll` = っ を出す堂々巡り）。
+     * 小書きは x 系、くぁ は kw 系で打てるので失われる字は無い。 */
+    /* ここ（ローマ字層）では未知の字はそのまま素通りする。
+     * **利用者がこれを見ることは無い。** `l` と `q` は上の SKK 層が
+     * モード切り替えとして先に横取りするので、ここまで降りてこない。 */
+    T_EQ_STR(type("la"), "lあ");
+    T_EQ_STR(type("qa"), "qあ");
+    T_EQ_STR(type("kwa"), "くぁ");
 }
 
 static void test_sokuon(void)

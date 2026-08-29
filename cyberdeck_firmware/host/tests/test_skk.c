@@ -340,6 +340,49 @@ static void test_abbrev(void)
 
 static void test_reset(void)
 {
+    T_CASE("打ちかけがあってもモードを変えられる");
+    /* **これができないと、かな入力から抜けられなくなる。**
+     * `nihon` の直後は末尾の n が残っている。以前はそこで `l` が
+     * 文字扱いになり、その `l` がまた打ちかけになって、
+     * 次の `l` が `ll` = っ を出す堂々巡りになっていた。 */
+    start(CDK_SKK_HIRAGANA);
+    type("nihon");
+    T_EQ_STR(cdk_skk_preedit(&S), "n"); /* n が打ちかけ */
+    type("l");
+    T_EQ_INT(cdk_skk_get_mode(&S), CDK_SKK_ASCII);
+    /* 打ちかけの n は捨てずに ん として出す */
+    T_EQ_STR(COMMITTED, "にほん");
+    T_EQ_STR(cdk_skk_preedit(&S), "");
+
+    T_CASE("l を続けて押しても っ にならない");
+    start(CDK_SKK_HIRAGANA);
+    type("lll");
+    /* 1 つ目で英数へ抜けるので、残りはそのまま素通りする */
+    T_EQ_INT(cdk_skk_get_mode(&S), CDK_SKK_ASCII);
+    T_CHECK(strstr(COMMITTED, "っ") == NULL);
+
+    T_CASE("q も打ちかけがあって効く");
+    start(CDK_SKK_HIRAGANA);
+    type("nihon");
+    type("q");
+    T_EQ_INT(cdk_skk_get_mode(&S), CDK_SKK_KATAKANA);
+    T_EQ_STR(COMMITTED, "にほん");
+
+    T_CASE("小書き文字は x 系で打てる");
+    /* `l` から役目を外したので、こちらが唯一の道になる。 */
+    start(CDK_SKK_HIRAGANA);
+    type("xatu");
+    T_EQ_STR(COMMITTED, "ぁつ");
+    start(CDK_SKK_HIRAGANA);
+    type("xtu");
+    T_EQ_STR(COMMITTED, "っ");
+
+    T_CASE("くぁ は kw 系で打てる");
+    /* `q` から役目を外したぶん、ここで拾えるようにしてある。 */
+    start(CDK_SKK_HIRAGANA);
+    type("kwa");
+    T_EQ_STR(COMMITTED, "くぁ");
+
     T_CASE("reset で入力中のものを捨てる");
     start(CDK_SKK_HIRAGANA);
     type("Nihon ");
