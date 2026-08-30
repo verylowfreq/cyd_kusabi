@@ -21,6 +21,8 @@ ESP32-S3 サイバーデックのファームウェア。設計は [DESIGN.md](D
   I2C / UART / TCP・UDP）。焼き直さずに機能を足せる。
   SDK は **C と Rust の両方**（`wasm-sdk/` と `wasm-sdk/rust/`）
 
+加えて **ターミナルのスクロールバック 200 行**（`Shift+PgUp`。DESIGN.md §6.5）。
+
 残件と「やらないこと」は DESIGN.md §13 / §15.15 を参照。
 
 ---
