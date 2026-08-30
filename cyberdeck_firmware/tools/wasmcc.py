@@ -42,7 +42,7 @@ def find_clang():
     sys.exit("clang が見つかりません。PATH を通すか LLVM を入れてください。")
 
 
-def compile_one(clang, src, out, verbose=False):
+def compile_one(clang, src, out, verbose=False, strict=False):
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     cmd = [
         clang,
@@ -53,7 +53,10 @@ def compile_one(clang, src, out, verbose=False):
         "-std=c11",
         "-Wall",
         "-Wextra",
-        "-Werror",
+        # **-Werror は既定で付けない。** ここでビルドするのは利用者のアプリで、
+        # 「引数を使っていない」程度で止められると書き始められない。
+        # 自分のコードを厳しく見たいときは --strict。
+        *(["-Werror"] if strict else []),
         "-I", SDK_INC,
         # --no-entry: _start は無い。cdk_main だけを出す。
         "-Wl,--no-entry",
@@ -89,6 +92,8 @@ def main():
     ap.add_argument("-o", "--out", help="出力先。src が 1 個のときだけ")
     ap.add_argument("--all", action="store_true", help="wasm-apps/*.c を全部")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--strict", action="store_true",
+                    help="警告をエラーにする (-Werror)")
     args = ap.parse_args()
 
     srcs = list(args.src)
@@ -103,7 +108,7 @@ def main():
     ok = True
     for src in srcs:
         out = args.out or os.path.join(BUILD, os.path.splitext(os.path.basename(src))[0] + ".wasm")
-        if not compile_one(clang, src, out, args.verbose):
+        if not compile_one(clang, src, out, args.verbose, args.strict):
             ok = False
     return 0 if ok else 1
 

@@ -20,7 +20,7 @@ ABOUT.md の「決めてほしいこと」と、2026-08-27 のヒアリングで
 | 端末セル | 半角 6x12 / 全角 12x12 → **80桁 x 26行** |
 | フォント | 東雲フォント 12px (BDF, Public Domain) |
 | 試作機の入力 | PC からシリアル経由でキーイベントを注入 |
-| 開発優先順位 | M0 基盤 → **M1 VT+コンソール → M2 WiFi+SSH** → M3 シェル/周辺 → M4 SD → M5 SKK → M6 エディタ |
+| 開発優先順位 | M0 基盤 → **M1 VT+コンソール → M2 WiFi+SSH** → M3 シェル/周辺 → M4 SD → M5 SKK → M6 エディタ → M7 最終ハード → M8 wasm |
 | ワープロ | microSD 上のプレーンテキストを編集する簡易エディタ (SKK 併用) |
 | GUI ライブラリ | 使わない。テキストグリッドを自前描画（LVGL は依存とサイズが見合わない） |
 
@@ -758,6 +758,7 @@ sdtest                   SD に書いて読み戻す
 gpio mode|set|get <pin>  予約ピンは名前つきで弾く
 i2c scan|read|write
 adc read <ch>
+wasm run|ls|info         ユーザーアプリ (.wasm)。止めるのは Ctrl-C  [M8]
 ```
 
 未実装: `cp` `mv` `df` `pwm` `uart` `wifi scan` `shot` の SD 保存。
@@ -905,6 +906,8 @@ ABOUT.md 「実装困難・不能な箇所についての指摘と代替案」�
 | 10 | **truecolor → RGB565** | 色が丸まる | 仕様として許容。SGR は受理し最近傍に丸める |
 | 11 | **日本語 IME の候補表示領域** | 26行のうち 1〜2行を食う | 候補はステータス帯直上に 1 行のオーバーレイで出し、端末バッファは汚さない |
 | 12 | **ABOUT.md に生の PSK / SSH パスワードがコミットされている** | 資格情報の漏洩 | ファームには焼かない。テスト後にローテートし、資料からは伏せ字にすることを推奨 |
+| 13 | **ユーザーアプリの無限ループが止められない** | `wasm run` したアプリが native を一度も呼ばずに回ると Ctrl-C が届かない | wasm3 の構造上の限界。native の入口では必ず止まるので、`sys_delay` や `con_write` を挟むアプリは止まる。止まらなければ `reboot`。マニュアルにもそう書いた（§15.5） |
+| 14 | **予約ピンの表が試作機のものしか無かった** | v1 で `gpio set 12` が画面を殺し、`gpio set 15` が制御チャネルを殺す。逆に Grove の I2C が使えない | ✅ M8 で解決。`cdk_board.h` を唯一の出どころにして表を基板ごとに分けた（§15.12） |
 
 ---
 
@@ -1541,3 +1544,312 @@ ssh-keygen -l : 256 SHA256:EdkLEb+mPmDNjBfDGEJepj/qLS332bvGM0UfRA/ZLAc (ECDSA)
 > **中止（キー入力で止める）は実機で通していない。** 相手が生きていると
 > 1 回目で繋がってしまい、止める隙が無い。状態機械はホストテストで
 > 見ているが、結線は目視のみ。
+
+---
+
+## 15. M8 — WebAssembly ユーザーアプリ ✅ できている (2026-08-30)
+
+ファームを焼き直さずに機能を足せるようにする。`.wasm` を microSD に置いて
+`wasm run` で走らせる。
+
+```
+$ wasm run apps/hello.wasm foo
+こんにちは、wasm から
+端末は 40桁 x 12行
+引数[0] = apps/hello.wasm
+引数[1] = foo
+wasm  : 終了 (0)
+```
+
+### 15.1 なぜ独自 ABI にしたか
+
+WASI でも POSIX 互換でもない。理由は 3 つ:
+
+- WASI を名乗ると `fd_prestat_dir_name` や `clock_res_get` まで期待される。
+  **実装しない関数が「壊れている関数」になる。** 名乗らなければ「無い」で済む。
+- POSIX 互換は errno・シグナル・ブロッキングの意味論を全部背負う。
+  この機械はメインループ 1 本で回っていて、その意味論は載らない。
+- 独自なら**引数を i32 と (ptr,len) の隣接ペアだけ**に揃えられる。
+  そこまで揃えると、サンドボックスの境界検査が機械的に検査できる形になる。
+
+### 15.2 ランタイムは wasm3
+
+| | wasm3 | WAMR |
+|---|---|---|
+| ライセンス | MIT | Apache 2.0 |
+| 中身 | 純 C99 の 12 ファイル | ビルドシステムごと大きい |
+| ESP-IDF | 自分でベンダリング | 公式コンポーネントあり |
+| AOT / JIT | 無い | ある |
+| **ホストビルドへの取り込み** | **そのまま通る** | 手間がかかる |
+
+最後の 1 行で決めた。§13 の「失敗したまま誰も見ていない検証は、無いのと
+同じ」への対策として、**ctest が本物の `.wasm` を実機と同じコードで回せる**
+ことの価値が AOT より大きい。実際 clang で 12 ファイルとも無警告で通った。
+
+上流: `components_port/wasm3/upstream/`（コミットは `COMMIT.txt`）。
+差分は当てていない（`PATCHES.md`）。
+
+### 15.3 層
+
+§1 の境界をそのまま延長する。**wasm3 のヘッダを純 C コアに入れない。**
+
+```
+components/cdk_wasm/          純 C。ABI・fd 表・パスのサンドボックス・リング
+components_port/wasm3/        上流のベンダリング（libssh2 と同じ作法）
+components_port/port_wasm/    wasm3 の出し入れと実機バックエンド
+main/cdk_wasmcmds.c           wasm コマンド
+main/cdk_pushfile.c           cdk.py push の受け側
+wasm-sdk/ wasm-apps/          ゲスト側の SDK とサンプル
+tools/wasmcc.py               clang のラッパ
+```
+
+`port_wasm/` の中は **ESP-IDF に触るかどうか**で割ってある:
+
+| ファイル | IDF | ホストビルド |
+|---|---|---|
+| `port_wasm_natives.c` | 無し | **入れる**（境界検査がここにある） |
+| `port_wasm_vm.c` | 無し | **入れる**（VM の出し入れ） |
+| `port_wasm.c` | あり | 入れない（タスク・PSRAM） |
+| `port_wasm_backend.c` | あり | 入れない（周辺・SD・ネット） |
+
+ホストビルドが `components_port/` を取り込むのは**ここだけ**。
+例外にした理由は「実機と同じ境界検査コードを ctest で回すため」で、
+`host/CMakeLists.txt` にも書いてある。
+
+### 15.4 実行モデル — 前面 1 本・専用タスク
+
+**アプリはメインループで走らせない。** この機械はコマンドを
+`cdk_shell_key → route_key →` メインループの中で同期実行するので、
+そこで回すと画面もキーも制御チャネルも止まり、Ctrl-C すら届かない。
+
+```
+wasm run apps/hello.wasm
+  → cmd_wasm: PSRAM へ読む → cdk_wasm_run_start → 即 return
+  → enter_wasm(): cdk_shell_end(); s_session = SESSION_WASM
+
+[wasm タスク]                   [メインループ]
+  m3_CallV(cdk_main)              route_key: キー → cdk_keys_encode → 入力リング
+    con_write → 出力リング          出力リングを排出 → cdk_term
+    con_read  ← 入力リング          s_dirty なら描画 + フラッシュ
+    fs_* / gpio_* / sock_*          終了フラグを見たら enter_shell()
+```
+
+**走っている間シェルは止まっている**（`edit` / `ssh` と同じ）。おかげで、
+ロックを持たない `port_periph` / `port_cfg` をシェルとアプリが同時に叩く
+事故が構造的に起きない。バックグラウンド実行を選ばなかった理由がここ。
+
+端末・画面・SKK を触るのはメインループだけ、という M1 からの不変条件も
+壊していない。wasm タスクが触るのはリングとバックエンドだけ。
+SD は `cdk_sd_lock` が再帰ミューテックスなので別タスクからでも安全。
+
+リングは**単一生産者・単一消費者**で volatile な head/tail しか持たない。
+それで足りるように **wasm タスクをメインタスクと同じ CPU0 に固定**してある。
+
+### 15.5 中断 — Ctrl-C
+
+`route_key` が `SESSION_WASM` のとき Ctrl-C を横取りして停止要求を立てる。
+wasm3 には WAMR の `wasm_runtime_terminate` に当たるものが無いので:
+
+- **すべての native の入口で停止要求を見て、立っていたらトラップする。**
+  トラップはインタプリタを巻き戻して `m3_CallV` から帰る。
+- `sys_delay` は 20ms 刻み、`sock_connect` は 100ms 刻み、
+  `sock_recv` は 200ms 上限、`uart_read` は待たない。
+  **いちばん詰まりやすい API がいちばん止まらない API にならないこと。**
+
+> **native を一度も呼ばない無限ループは止められない。**
+> wasm3 の構造上の限界。`reboot` するしかない。§12 の表に足した。
+
+`wasm stop` は**置いていない**。走っている間はシェルが止まっているので、
+そのコマンドに入る道が無い。止める手段は Ctrl-C だけ。
+
+### 15.6 メモリ（実測 2026-08-30）
+
+| もの | 大きさ | どこ |
+|---|---|---|
+| `.wasm` の置き場 | 256KB (`CDK_WASM_MODULE_MAX`) | PSRAM・起動時に 1 回 |
+| wasm タスクのスタック | 64KB (`CDK_WASM_TASK_STACK`) | **PSRAM** |
+| `d_m3MaxNativeStack` | 48KB | 上のスタックより小さく |
+| wasm3 オペランドスタック | 16KB | wasm3 が確保 |
+| ゲストの線形メモリ | 1MB まで | wasm3 が確保 |
+| 出力リング / 入力リング | 4KB / 512B | `cdk_wasm` の static |
+
+app は 1,406KB → **1,527KB**（wasm3 + cdk_wasm + port_wasm で +121KB）。
+
+**タスクスタックを内部 DRAM から取れなかった。** 空きは 77,959 バイト
+あるのに**最大ブロックが 31,744 バイト**しかなく、32KB の連続領域が
+取れずに `wasm run` が「タスクを作れません」で落ちた。内部 DRAM は
+この機械でいちばん足りない資源なので、削るのではなくキャンバス・辞書・
+エディタ領域と同じく PSRAM へ置いた（`xTaskCreatePinnedToCoreWithCaps`。
+消すときは `vTaskDeleteWithCaps`）。
+
+**結果的にそれが正解で、hello.wasm ですら 42KB 使っていた**（高水位は
+64KB 中 23,524 バイト残り）。32KB のままだったら、仮に確保できていても
+スタックを踏み抜いていた。
+
+> PSRAM スタックのタスクは**フラッシュのキャッシュが無効な間は走れない。**
+> wasm タスクが触るのは SD (SPI) と GPIO だけで、NVS への書き込みは
+> シェル側でしか起きないので条件を満たしている。ここは増やすときに要注意。
+
+**アリーナ化のパッチは要らなかった。** `d_m3FixedHeap` は static 配列 +
+リセットできない bump アロケータで、`wasm run` のたびに食い潰す。素の
+`calloc`/`free` のままにして hello.wasm を 10 回走らせたところ、前後の
+`free` がバイト単位で一致した（internal 77,959 / 最大 31,744、
+spiram 7,561,620 / 最大 7,471,104）。wasm3 は `m3_FreeRuntime` で全部返す。
+
+### 15.7 ABI
+
+インポートモジュール名 `"cdk"`、エントリは `cdk_main` を `(i32 argc) -> i32`。
+定義は `components/cdk_wasm/include/cdk_wasm_abi.h`、ゲスト側は
+`wasm-sdk/include/cdk_app.h`。**この 2 つは対で直すこと。**
+
+| 群 | 関数 |
+|---|---|
+| sys | `sys_exit` `sys_now_ms` `sys_delay` `sys_argc` `sys_arg` `sys_random` |
+| con | `con_write` `con_read` `con_size` |
+| fs | `fs_open` `fs_read` `fs_write` `fs_seek` `fs_close` `fs_size` `fs_unlink` `fs_mkdir` `fs_opendir` `fs_readdir` `fs_closedir` |
+| gpio | `gpio_mode` `gpio_set` `gpio_get` `adc_read` |
+| i2c | `i2c_open` `i2c_write` `i2c_read` `i2c_wrrd` `i2c_close` |
+| uart | `uart_open` `uart_write` `uart_read` `uart_close` |
+| net | `net_up` `sock_open` `sock_connect` `sock_send` `sock_recv` `sock_close` |
+| gfx | `gfx_size` `gfx_clear` `gfx_fill_rect` `gfx_blit` `gfx_text` `gfx_present` — **予約。`CDK_E_NOSYS` を返す** |
+
+エラーは負の戻り値（`CDK_E_INVAL` -1 / `PERM` -2 / `NOENT` -3 / `IO` -4 /
+`NOMEM` -5 / `AGAIN` -6 / `NOSYS` -7 / `TIME` -8 / `ABORT` -9）。
+
+**キー入力は既存の `cdk_keys_encode` を通したバイト列**として `con_read` に
+流す。ゲストからは普通の端末に見える。新しいキーの表現を作らない。
+
+#### 描画 (`gfx_*`) を予約だけにした理由
+
+キャンバスはメインループが専有していて、**所有権の受け渡しを設計しないと
+開放できない**（`cdk_canvas` にも `cdk_screen` にもロックが無い）。
+名前と署名だけ決めておけば、あとから実装してもゲストの再ビルドが要らない。
+
+### 15.8 サンドボックス
+
+1. **メモリ。** wasm3 の `m3ApiGetArgMem` は境界検査をしない。
+   ポインタ引数はすべて `m3ApiCheckMem` と対にする。
+   `m3ApiCheckMem` は長さを uint64 に広げて比べるので、
+   **i32 で渡ってくる負の長さも巨大な長さとして弾かれる**（fixture で確認）。
+
+   > 対になっているかは ctest **`wasm_natives_checked`** が見る。
+   > 数えるのは「近くにあるか」ではなく **関数ごとの個数の一致**。
+   > 前者だと `i2c_wrrd`（バッファ 2 本）や `sock_connect` や `con_size` で
+   > 片方だけ検査していても素通りする。1 個消して落ちることを確かめてある。
+
+2. **パス。** `..` を**畳んでから** `/sdcard` の下かを見る
+   （`cdk_wasm_path_resolve`、純 C・ホストでテスト）。文字列の先頭だけ
+   見る実装だと `/sdcard/../etc` が通る。`/sdcardX` にも騙されない。
+   `cdk.py push` の書き込み先も同じ関数を通す。**規則を 2 か所に持たない。**
+
+3. **ピン。** `cdk_gpio_is_reserved` を GPIO・I2C・UART の全部で通す。
+
+4. **ハンドル。** ファイル 4 / ディレクトリ 2 / ソケット 4 / UART 1 / I2C 1。
+   ゲストが見るのは表の添字だけで、`FILE*` も socket fd も渡らない。
+   閉じ忘れは `cdk_wasm_ctx_cleanup` が終了時に全部返す。
+   ファイルが 4 なのは FATFS の `max_files = 5` のうち 1 本を本体に残すため。
+
+### 15.9 出力は捨てずに待つ
+
+`con_write` はリングが埋まったら**待つ**。捨てる実装にすると、リング 4KB に
+対しメインループが 1 周で汲むのは 2KB なので、ファイルを読んで出し続ける
+アプリの出力が**画面から静かに消えてログにしか残らない**。端末が本来やるのは
+流量制御のほうで、アプリを少し待たせるのが正しい。待つ間も Ctrl-C は効く。
+
+`flood.wasm`（200 行を一息に出す）で 1 つも欠けないことを実機で確認した。
+
+### 15.10 ゲスト側
+
+**WASI SDK は要らない。** clang の wasm32 バックエンドをそのまま使う。
+
+```
+python tools/wasmcc.py wasm-apps/hello.c        # → wasm-apps/build/hello.wasm
+python tools/wasmcc.py --all
+```
+
+自由形式 (`-nostdlib`) なので libc が無い。`memcpy` / `memset` などは
+`wasm-sdk/src/cdk_app.c` が自前で持つ。**使っていなくても要る**（clang が
+構造体のコピーや配列の初期化で勝手に呼ぶ）。`cdk_printf` は
+`%d %u %x %c %s %%` だけ。確保は解放しないバンプ (`cdk_alloc`)。
+
+同じ ABI に Rust (`wasm32-unknown-unknown`) から当てるのはファーム側の
+変更なしでできる。インポートの宣言だけ書き直せばよい。
+
+### 15.11 転送 (`cdk.py push`)
+
+```
+python tools/cdk.py push wasm-apps/build/hello.wasm apps/hello.wasm
+```
+
+`cdk_proto` に `FILE_BEGIN` / `DATA` / `END` / `OK` を足した。**SD を
+抜き差しせずにアプリを更新できることが、エージェントが自分で書いて自分で
+試すループの前提。**
+
+フレームごとの CRC は transport の壊れしか見ない。**フレームがまるごと
+落ちたことは見つけられない**ので、長さと全体の CRC を `END` で突き合わせる。
+
+### 15.12 実機で見つかったこと
+
+#### 予約ピンの表が試作機のものしか無かった
+
+I2C と UART がピンを取るので予約表を通したところ、この表が CoreS3 の
+ピンしか知らないことが分かった。v1 はピン配置がまったく違う。
+
+| | 素通しだったもの | 逆に塞いでいたもの |
+|---|---|---|
+| v1 | LCD (G8-G14) / SD (G39-G42) / 制御チャネル (G15,G16) / ログ UART (G43,G44) | Grove の I2C (G17,G18) |
+
+**v1 では `gpio set 12` で画面が死に、`gpio set 15` で PC と話せなくなる**
+状態だった。`gpio` コマンドからも届く既存の穴で、ユーザーアプリで広がった。
+逆に、自分の基板の Grove コネクタに I2C で繋げなかった。
+
+ピン番号の出どころを `cdk_board.h` ひとつにして、表を基板ごとに分けた。
+
+#### 生成した C のエスケープが ESC 実体に潰れた
+
+DEV_STATS の #13 / #14 と同じ。**シェルのヒアドキュメント経由で
+エスケープを含む C を書かない。** 今回は `main.c` の 4 か所が壊れた。
+
+### 15.13 完了条件と検証
+
+```
+ctest --test-dir build-host --output-on-failure   # 26 スイート
+python tools/cdk.py selftest                      # 基準画像と一致
+```
+
+ホスト側の新規 3 つ:
+
+| テスト | 見ているもの |
+|---|---|
+| `test_wasm_abi` | パスのサンドボックス・fd 表・リング・引数の複製・流量制御 |
+| `test_wasm_run` | **本物の wasm3 でコミット済み `.wasm` を実機と同じコードで実行** |
+| `wasm_natives_checked` | 境界検査の個数一致 |
+
+`test_wasm_run` の**最初のケースは「トラップしたあとにもう一度走るか」**。
+ここが崩れると Ctrl-C で止めたあと 2 本目が走らない。
+
+実機:
+
+| 見たこと | 証拠 |
+|---|---|
+| 出力・端末寸法・引数・終了コード | `m8_hello.png` |
+| 走っている間も画面が動く | `m8_spin.png` |
+| Ctrl-C で止まりプロンプトが戻る | `m8_stop.png` |
+| `con_read` で対話 | `m8_echo.png` |
+| サンドボックスの拒否 | `m8_sandbox.png` |
+| GPIO と予約ピンの拒否 | `m8_periph.png` |
+| 基板ごとの予約ピン / Grove I2C | `m8_pins.png` |
+| 素の TCP で HTTP GET | `m8_http.png` |
+| 大量出力が欠けない | `m8_flood.png` |
+| 10 回走らせてヒープが戻る | `m8_free_before/after.png` |
+
+### 15.14 やっていないこと
+
+- WASI 互換 / POSIX 互換
+- バックグラウンド実行・ジョブ制御・複数アプリの同時実行
+- AOT / JIT（wasm3 はインタプリタのみ）
+- ピクセル描画（`gfx_*` は ID 予約のみ）
+- ゲスト向けの動的メモリ解放（SDK はバンプ確保のみ）
+- 専用フラッシュパーティション（`partitions.csv` は触っていない）
+- **I2C と UART は実機のデバイスで未検証。** 繋ぐものが手元に無く、
+  ピンの拒否・`i2c_open`・バス走査までしか確かめていない。

@@ -162,6 +162,7 @@ Ctrl-W       直前の単語を消す
 | `edit` | テキストを編集する |
 | `gpio` `adc` `i2c` | 外部端子をいじる |
 | `reboot` | 再起動 |
+| `wasm run <file>` | ユーザーアプリを走らせる（→ 10 章） |
 
 ---
 
@@ -331,7 +332,118 @@ reboot
 
 ---
 
-## 10. 分かっていること・できないこと
+## 10. 自分でアプリを書く
+
+**ファームウェアを焼き直さずに機能を足せる。** WebAssembly (`.wasm`) を
+microSD に置いて `wasm run` で走らせる。
+
+センサを読んで SD に記録する、GPIO を叩く、ネットワークから何か取ってくる、
+といったことが、C を書いて `.wasm` に変換するだけでできる。
+
+### 走らせる
+
+```
+wasm ls                          apps/ にあるアプリを並べる
+wasm run apps/hello.wasm         走らせる
+wasm run apps/blink.wasm 1 20    引数も渡せる
+wasm info                        ABI と上限を見る
+```
+
+**止めるのは `Ctrl-C`。** アプリが動いている間もシェルは止まっているので、
+`wasm stop` のようなコマンドは無い。
+
+アプリが動いている間も**画面と時計は動き続ける**。固まったように見えたら、
+それはアプリが何か待っているだけ。
+
+### 付いてくるアプリ
+
+`wasm-apps/` にソースがある。読めばだいたいの書き方が分かる。
+
+| | 何をするか |
+|---|---|
+| `hello.wasm` | 挨拶して端末の大きさと引数を出す |
+| `echo.wasm` | 打った文字をそのまま返す（入力の例） |
+| `flood.wasm` | 200 行を一息に出す（出力が落ちないかの確認） |
+| `spin.wasm` | 回り続ける（Ctrl-C の確認） |
+| `blink.wasm` | GPIO を点滅させる。`wasm run apps/blink.wasm <ピン> [回数]` |
+| `i2cscan.wasm` | I2C を探す。`wasm run apps/i2cscan.wasm <SDA> <SCL>` |
+| `uartecho.wasm` | 端末と外部 UART をつなぐ |
+| `httpget.wasm` | `wasm run apps/httpget.wasm example.com /` |
+
+### 書く
+
+```c
+#include "cdk_app.h"
+
+CDK_MAIN int cdk_main(int argc)
+{
+    (void)argc;
+    cdk_print("やあ\r\n");
+
+    int fd = fs_open(CDK_S("log.txt"), CDK_OPEN_APPEND);
+    if (fd >= 0) {
+        fs_write(fd, CDK_S("動いた\n"));
+        fs_close(fd);
+    }
+    return 0;
+}
+```
+
+**改行は `\r\n`。** `\n` だけだと行頭に戻らず、階段状に流れていく。
+
+使える関数は `wasm-sdk/include/cdk_app.h` に全部書いてある。
+コンソール・ファイル・待ち・GPIO・ADC・I2C・UART・TCP/UDP ソケット。
+
+### 変換する
+
+PC 側で clang を使う。**WASI SDK のような別のものを入れる必要は無い。**
+
+```
+python tools/wasmcc.py wasm-apps/hello.c      # → wasm-apps/build/hello.wasm
+python tools/wasmcc.py --all                  # 全部
+```
+
+### 実機へ送る
+
+**microSD を抜かなくていい。** ケーブルが繋がっていれば PC から直接書ける。
+
+```
+python tools/cdk.py push wasm-apps/build/hello.wasm apps/hello.wasm
+```
+
+置き場所を省くと `apps/` の下に同じ名前で入る。
+
+### できないこと・気をつけること
+
+- **触れるのは microSD の中だけ。** `..` で外へ出ようとすると断られる。
+  設定や秘密鍵はアプリからは見えない。
+- **液晶に絵は描けない。** `gfx_*` という名前だけ用意してあるが、呼ぶと
+  「未実装」が返る。文字は `con_write` で出す（色や位置は端末の
+  エスケープ列がそのまま使える）。
+- **同時に動くのは 1 本だけ。** アプリを動かしながらシェルは使えない。
+- **`while (1) { }` のように何も呼ばずに回るアプリは Ctrl-C で止まらない。**
+  `sys_delay` や `con_write` を挟んでいれば止まる。止まらなくなったら
+  電源を入れ直すしかない。
+- **アプリの大きさは 256KB まで。** 開けるファイルは同時に 4 つまで。
+- **外部 UART は 1 本だけ。** 残りはコンソールと PC との通信で埋まっている。
+- **液晶・microSD・USB・PC との通信に使っているピンは触れない。**
+  名前を出して断るので、何に使われているかはその場で分かる。
+- **I2C と UART は、実際のデバイスを繋いだ確認をしていない。**
+  ピンの拒否とバスを開けるところまでしか試していない。
+
+### 何かおかしいとき
+
+| 出たもの | たぶんこれ |
+|---|---|
+| `SD がマウントされていません` | `sd mount` |
+| `... は開けません（microSD の外です）` | パスが `/sdcard` の外を指している |
+| `読めません: ...` | `.wasm` が壊れているか、`cdk_main` を出していない |
+| `落ちました: out of bounds ...` | アプリが配列の外を触った（本体は無事） |
+| `G12 は LCD SCLK に使われています` | そのピンは基板が使っている |
+
+---
+
+## 11. 分かっていること・できないこと
 
 正直に書いておく。
 
@@ -346,7 +458,7 @@ reboot
 
 ---
 
-## 11. ファームウェアを更新する
+## 12. ファームウェアを更新する
 
 ### 用意するもの
 
@@ -421,6 +533,15 @@ python tools/cdk.py shot out.png --verify   画面を取得して基準画像と
 python tools/cdk.py type "ls\n"             文字を流し込む
 python tools/cdk.py key ctrl+j              キーを 1 つ送る
 python tools/cdk.py cam out.jpg             パネルをカメラで撮る
+python tools/cdk.py push a.wasm apps/a.wasm microSD へファイルを書く
+```
+
+ユーザーアプリ（→ 10 章）:
+
+```
+python tools/wasmcc.py wasm-apps/hello.c    .c → .wasm（clang だけで足りる）
+python tools/wasmcc.py --all
+python tools/cdk.py push wasm-apps/build/hello.wasm apps/hello.wasm
 ```
 
 ホスト側のテスト（実機は要らない）:
