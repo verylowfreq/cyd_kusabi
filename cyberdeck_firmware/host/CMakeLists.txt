@@ -32,6 +32,7 @@ set(CDK_CORE_MODULES
     cdk_screen
     cdk_skk
     cdk_edit
+    cdk_wasm
 )
 
 set(CDK_CORE_SRCS "")
@@ -89,6 +90,7 @@ set(CDK_TESTS
     test_skk
     test_skk_user
     test_edit
+    test_wasm_abi
 )
 
 foreach(t ${CDK_TESTS})
@@ -110,6 +112,13 @@ add_test(NAME sources_listed
          COMMAND ${CMAKE_COMMAND}
                  -DCORE_DIR=${CDK_CORE_DIR}
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_sources_listed.cmake)
+
+# ゲストの線形メモリの境界検査が抜けていないか。
+# 人間のレビューに任せる種類の間違いではないので、テストとして常時回す。
+add_test(NAME wasm_natives_checked
+         COMMAND ${CMAKE_COMMAND}
+                 -DNATIVES=${CMAKE_CURRENT_SOURCE_DIR}/../components_port/port_wasm/port_wasm_natives.c
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_wasm_natives.cmake)
 
 add_test(NAME no_idf_in_core
          COMMAND ${CMAKE_COMMAND}
@@ -157,3 +166,39 @@ target_compile_definitions(cdk_render PRIVATE CDK_FONT_BLOB_PATH="${CDK_FONT_BLO
 # 索引の並べ直しの誤りが表に出ないので、17 万件で別実装と突き合わせる。
 add_executable(skk_probe tools/skk_probe.c)
 target_link_libraries(skk_probe PRIVATE cdk_core)
+
+# --- wasm3 とユーザーアプリの実行 ---
+#
+# 上流 wasm3 は純 C99 なので、実機と同じソースをホストでも組める。
+# **components_port/ をホストビルドが取り込むのはここだけ。** 例外にする理由は、
+# ゲストの境界検査（port_wasm_natives.c の m3ApiCheckMem）と VM の出し入れ
+# （port_wasm_vm.c）を、実機と同じコードのまま ctest で回したいから。
+# この 2 ファイルは ESP-IDF に依存しないように書いてある。
+# FreeRTOS のタスクと PSRAM を触る port_wasm.c / port_wasm_backend.c は入れない。
+set(WASM3_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components_port/wasm3/upstream/source)
+file(GLOB WASM3_SRCS CONFIGURE_DEPENDS ${WASM3_DIR}/*.c ${WASM3_DIR}/extensions/*.c)
+add_library(wasm3 STATIC ${WASM3_SRCS})
+target_include_directories(wasm3 PUBLIC ${WASM3_DIR})
+# 実機と同じ上限。ここが違うと「ホストでは通るのに実機で落ちる」が出る。
+target_compile_definitions(wasm3 PUBLIC d_m3MaxNativeStack=20480)
+if(MSVC)
+    target_compile_options(wasm3 PRIVATE /W0)
+else()
+    target_compile_options(wasm3 PRIVATE -w)
+endif()
+
+set(PORT_WASM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components_port/port_wasm)
+add_executable(test_wasm_run
+               tests/test_wasm_run.c
+               ${PORT_WASM_DIR}/port_wasm_vm.c
+               ${PORT_WASM_DIR}/port_wasm_natives.c)
+target_include_directories(test_wasm_run PRIVATE ${PORT_WASM_DIR}/include)
+target_link_libraries(test_wasm_run PRIVATE cdk_core cdk_testmain wasm3)
+target_compile_definitions(test_wasm_run PRIVATE
+    CDK_WASM_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/wasm")
+if(MSVC)
+    target_compile_options(test_wasm_run PRIVATE /W4 /WX /wd4996)
+else()
+    target_compile_options(test_wasm_run PRIVATE -Wall -Wextra -Werror)
+endif()
+add_test(NAME test_wasm_run COMMAND test_wasm_run)

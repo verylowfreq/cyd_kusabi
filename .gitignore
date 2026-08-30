@@ -40,3 +40,7 @@ cyberdeck_firmware/*.jpg
 
 # 統計フックが貯める生カウンタ（DEV_STATS.md に集計する）
 .dev-stats.json
+
+# ユーザーアプリのビルド成果。
+# host/fixtures/wasm/*.wasm は ctest が使うのでコミットする（ここでは無視しない）。
+cyberdeck_firmware/wasm-apps/build/
