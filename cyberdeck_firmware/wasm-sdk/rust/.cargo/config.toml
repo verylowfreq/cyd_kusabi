@@ -1,0 +1,12 @@
+# ここでターゲットを固定しておくと、アプリ側は cargo build だけで済む。
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  # 線形メモリの枠。**ファーム側が 1MB (16 ページ) で断る**ので、
+  # 宣言のほうもそこに揃える。指定しないと「上限なし」として出る。
+  "-C", "link-arg=--max-memory=1048576",
+  # ゲストのスタック。C 版 (wasmcc.py) と同じ 8KB。
+  "-C", "link-arg=-zstack-size=8192",
+]

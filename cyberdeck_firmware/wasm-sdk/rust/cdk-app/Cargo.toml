@@ -1,0 +1,17 @@
+[package]
+name = "cdk-app"
+version = "0.1.0"
+edition = "2024"
+description = "サイバーデックのユーザーアプリ用 SDK（独自 wasm ABI）"
+license = "MIT"
+publish = false
+
+[features]
+default = ["heap", "panic-handler"]
+# バンプの GlobalAlloc。外すとアプリ側が自分で用意する。
+heap = []
+# パニックの理由を端末に出す #[panic_handler]。
+panic-handler = []
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"

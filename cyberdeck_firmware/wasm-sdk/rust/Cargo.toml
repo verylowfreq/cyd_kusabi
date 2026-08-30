@@ -1,0 +1,18 @@
+# サイバーデックのユーザーアプリ（Rust）。
+#
+#   cargo build --release            # 全部
+#   python ../../tools/wasmrs.py --all
+#
+# ターゲットは .cargo/config.toml で wasm32-unknown-unknown に固定してある。
+[workspace]
+resolver = "3"
+members = ["cdk-app", "apps/*"]
+
+# 256KB の枠に収めるための設定。プロファイル任せにしない。
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false

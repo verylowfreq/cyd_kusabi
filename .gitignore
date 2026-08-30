@@ -44,3 +44,6 @@ cyberdeck_firmware/*.jpg
 # ユーザーアプリのビルド成果。
 # host/fixtures/wasm/*.wasm は ctest が使うのでコミットする（ここでは無視しない）。
 cyberdeck_firmware/wasm-apps/build/
+
+# Rust のビルド成果。
+cyberdeck_firmware/wasm-sdk/rust/target/
