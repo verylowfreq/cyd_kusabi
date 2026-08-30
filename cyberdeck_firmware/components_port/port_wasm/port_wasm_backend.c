@@ -13,7 +13,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "cdk_net.h"
 #include "cdk_periph.h"
+#include "cdk_sock.h"
 #include "cdk_storage.h"
 #include "cdk_wasm.h"
 #include "cdk_wasm_run.h"
@@ -229,11 +231,129 @@ static int h_adc_read(void *u, int ch)
     return (mv >= 0) ? mv : CDK_E_IO;
 }
 
-/* ---- 表 --------------------------------------------------------------
+/* ---- I2C ------------------------------------------------------------- */
+
+static int h_i2c_open(void *u, int sda, int scl, int hz)
+{
+    (void)u;
+    return map_err(cdk_i2c_open(sda, scl, (uint32_t)hz));
+}
+
+static int h_i2c_write(void *u, int addr, const void *p, int n)
+{
+    (void)u;
+    return map_err(cdk_i2c_write(addr, p, (size_t)n));
+}
+
+static int h_i2c_read(void *u, int addr, void *p, int n)
+{
+    (void)u;
+    return map_err(cdk_i2c_read(addr, p, (size_t)n));
+}
+
+static int h_i2c_wrrd(void *u, int addr, const void *w, int wn, void *r, int rn)
+{
+    (void)u;
+    return map_err(cdk_i2c_write_read(addr, w, (size_t)wn, r, (size_t)rn));
+}
+
+static int h_i2c_close(void *u)
+{
+    (void)u;
+    return map_err(cdk_i2c_close());
+}
+
+/* ---- UART ------------------------------------------------------------
  *
- * I2C の読み書き・UART・ソケットはまだ埋めていない（M8e / M8f）。
- * 埋まっていない口は cdk_wasm が CDK_E_NOSYS を返す。
+ * **1 本しかない。** cdk_wasm 側の上限も 1 にしてあるが、断れる側は
+ * こちらなので、ここでも二重に開けないことを見る。
  */
+
+static int h_uart_open(void *u, int tx, int rx, int baud)
+{
+    (void)u;
+    if (cdk_uart_is_open()) return CDK_E_NOMEM;
+    const esp_err_t e = cdk_uart_open(tx, rx, baud);
+    if (e != ESP_OK) return map_err(e);
+    return 0; /* 実ハンドルは 1 つだけ。cdk_wasm が添字に置き換える */
+}
+
+static int h_uart_write(void *u, int h, const void *p, int n)
+{
+    (void)u; (void)h;
+    const int r = cdk_uart_write(p, n);
+    return (r < 0) ? CDK_E_IO : r;
+}
+
+static int h_uart_read(void *u, int h, void *p, int n)
+{
+    (void)u; (void)h;
+    const int r = cdk_uart_read(p, n);
+    return (r < 0) ? CDK_E_IO : r;
+}
+
+static int h_uart_close(void *u, int h)
+{
+    (void)u; (void)h;
+    return map_err(cdk_uart_close());
+}
+
+/* ---- ネットワーク -----------------------------------------------------
+ *
+ * 接続待ちの間も Ctrl-C が効くように、abort を関数ポインタで渡す。
+ * port_net 側は port_wasm を知らない。
+ */
+
+static int h_net_up(void *u)
+{
+    (void)u;
+    return cdk_wifi_is_connected() ? 1 : 0;
+}
+
+static int h_sock_open(void *u, int type)
+{
+    (void)u;
+    if (!cdk_wifi_is_connected()) return CDK_E_IO;
+    const int sd = cdk_sock_open(type == CDK_SOCK_UDP ? CDK_SOCK_TYPE_UDP
+                                                      : CDK_SOCK_TYPE_TCP);
+    return (sd < 0) ? CDK_E_IO : sd;
+}
+
+static int h_sock_connect(void *u, int sd, const char *host, int port)
+{
+    (void)u;
+    const int r = cdk_sock_connect(sd, host, port, 10000, cdk_wasm_stop_requested);
+    switch (r) {
+    case 0:                return CDK_E_OK;
+    case CDK_SOCK_TIMEOUT: return CDK_E_TIME;
+    case CDK_SOCK_ABORTED: return CDK_E_ABORT;
+    default:               return CDK_E_IO;
+    }
+}
+
+static int h_sock_send(void *u, int sd, const void *p, int n)
+{
+    (void)u;
+    const int r = cdk_sock_send(sd, p, n);
+    return (r < 0) ? CDK_E_IO : r;
+}
+
+static int h_sock_recv(void *u, int sd, void *p, int n)
+{
+    (void)u;
+    const int r = cdk_sock_recv(sd, p, n);
+    if (r >= 0) return r;                      /* 0 = いまは何も無い */
+    if (r == CDK_SOCK_CLOSED) return CDK_E_IO; /* 相手が閉じた */
+    return CDK_E_IO;
+}
+
+static int h_sock_close(void *u, int sd)
+{
+    (void)u;
+    return (cdk_sock_close(sd) == 0) ? CDK_E_OK : CDK_E_IO;
+}
+
+/* ---- 表 -------------------------------------------------------------- */
 
 static const cdk_wasm_host_t k_backend = {
     .user = NULL,
@@ -258,6 +378,24 @@ static const cdk_wasm_host_t k_backend = {
     .gpio_set  = h_gpio_set,
     .gpio_get  = h_gpio_get,
     .adc_read  = h_adc_read,
+
+    .i2c_open  = h_i2c_open,
+    .i2c_write = h_i2c_write,
+    .i2c_read  = h_i2c_read,
+    .i2c_wrrd  = h_i2c_wrrd,
+    .i2c_close = h_i2c_close,
+
+    .uart_open  = h_uart_open,
+    .uart_write = h_uart_write,
+    .uart_read  = h_uart_read,
+    .uart_close = h_uart_close,
+
+    .net_up       = h_net_up,
+    .sock_open    = h_sock_open,
+    .sock_connect = h_sock_connect,
+    .sock_send    = h_sock_send,
+    .sock_recv    = h_sock_recv,
+    .sock_close   = h_sock_close,
 };
 
 const cdk_wasm_host_t *cdk_wasm_backend(void) { return &k_backend; }

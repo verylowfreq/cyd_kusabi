@@ -58,7 +58,11 @@ enum {
     CDK_WASM_FILES_MAX  = 4,   /* FATFS の max_files=5 のうち 1 本は本体に残す */
     CDK_WASM_DIRS_MAX   = 2,
     CDK_WASM_SOCKS_MAX  = 4,
-    CDK_WASM_UARTS_MAX  = 2,
+    /* **外に出せる UART は 1 本しかない。** UART0 がコンソール、
+     * UART1 が制御チャネル (cdk_proto) で埋まっている。ここを 2 にすると
+     * cdk_wasm は 2 本目の口を開けてしまい、バックエンドが断ることになる。
+     * 断れる側が正しいので、数はハードに合わせておく。 */
+    CDK_WASM_UARTS_MAX  = 1,
     CDK_WASM_ARGV_MAX   = 8,
     CDK_WASM_ARGV_BYTES = 256,
     CDK_WASM_OUT_BYTES  = 4096, /* アプリ → 端末 */

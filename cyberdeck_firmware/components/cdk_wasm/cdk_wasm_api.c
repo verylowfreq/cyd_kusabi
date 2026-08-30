@@ -177,11 +177,34 @@ int cdk_wasm_con_write(cdk_wasm_ctx_t *c, const void *p, int n)
     if (!p || n < 0) return CDK_E_INVAL;
     if (n == 0) return 0;
 
-    /* リングが埋まっているのはメインループがまだ引き取っていないだけ。
-     * ここでブロックするとアプリが止まったように見えるので、
-     * 書けただけ書いて、捨てた分を数えて終了時に報告する。 */
-    const int wrote = cdk_wasm_ring_write(&c->out, p, n);
-    if (wrote < n) c->dropped += n - wrote;
+    /* リングが埋まっているのは、メインループがまだ引き取っていないだけ。
+     *
+     * **捨てない。譲って待つ。** リングは 4KB で、メインループが 1 周で
+     * 汲むのは 2KB。ファイルを読んで出し続けるアプリは簡単に追い越すので、
+     * 溢れたぶんを捨てると `cat` のようなアプリの出力が画面から静かに
+     * 消える（ログにしか残らない）。端末が本来やるのは流量制御のほうで、
+     * アプリを少し待たせるのが正しい。
+     *
+     * 待つ間も Ctrl-C は効く（delay_ms が刻んで見ている）。 */
+    const uint8_t *src = (const uint8_t *)p;
+    int            done = 0;
+
+    while (done < n) {
+        done += cdk_wasm_ring_write(&c->out, src + done, n - done);
+        if (done >= n) break;
+
+        if (c->stop) { c->dropped += n - done; return CDK_E_ABORT; }
+        if (!c->host->delay_ms) {
+            /* 待つ手段が無いバックエンド（テストの偽物など）では、
+             * 待てないぶんを捨てるしかない。数えて終了時に報告する。 */
+            c->dropped += n - done;
+            return n;
+        }
+        if (c->host->delay_ms(c->host->user, 2) == CDK_E_ABORT) {
+            c->dropped += n - done;
+            return CDK_E_ABORT;
+        }
+    }
     return n;
 }
 

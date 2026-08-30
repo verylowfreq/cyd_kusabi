@@ -1,4 +1,4 @@
-idf_component_register(SRCS "port_net.c" "port_ssh.c" "port_knownhosts.c" "port_sshkey.c"
+idf_component_register(SRCS "port_net.c" "port_ssh.c" "port_knownhosts.c" "port_sshkey.c" "port_sock.c"
                        INCLUDE_DIRS "include"
                        REQUIRES esp_wifi esp_netif esp_event lwip libssh2 mbedtls
                                 cdk_sshkey port_cfg port_storage)

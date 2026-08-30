@@ -102,7 +102,11 @@ static m3ApiRawFunction(n_con_write)
     m3ApiGetArgMem(const void *, buf);
     m3ApiGetArg(int32_t, len);
     m3ApiCheckMem(buf, len);
-    m3ApiReturn((int32_t)cdk_wasm_con_write(ctx, buf, len));
+    const int r = cdk_wasm_con_write(ctx, buf, len);
+    /* リングが空くのを待っている間に Ctrl-C が来たら、戻り値ではなく
+     * トラップで抜ける。sys_delay と揃える（戻り値だと無視して回り続けられる）。 */
+    if (r == CDK_E_ABORT) m3ApiTrap(k_trap_stopped);
+    m3ApiReturn((int32_t)r);
 }
 
 static m3ApiRawFunction(n_con_read)

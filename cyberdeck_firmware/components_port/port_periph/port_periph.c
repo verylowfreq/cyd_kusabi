@@ -1,5 +1,7 @@
 #include "cdk_periph.h"
 
+#include "cdk_board.h"
+
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_adc/adc_cali.h"
@@ -15,13 +17,55 @@ static const char *TAG = "cdk_periph";
 /* GPIO                                                                */
 /* ------------------------------------------------------------------ */
 
-/* CoreS3 で他の用途に取られているピン。
+/* 基板で他の用途に取られているピン。
  * 触ると画面が消える・書き込めなくなる・ログが止まる、といった形で
- * 「原因の分かりにくい壊れ方」をするので、コマンドから触らせない。 */
+ * 「原因の分かりにくい壊れ方」をするので、コマンドからもユーザーアプリ
+ * (cdk_wasm) からも触らせない。
+ *
+ * **基板ごとに中身がまったく違う。** 試作機 (CoreS3) の表を v1 に流用すると、
+ * v1 の LCD (G8-G14)・SD (G39-G42)・制御チャネル (G15/G16)・ログ UART
+ * (G43/G44) がどれも素通しになり、しかも Grove の I2C (G17/G18) が
+ * 逆に塞がって使えない。ピン番号の出どころは cdk_board.h ひとつにする。 */
 typedef struct {
     int         pin;
     const char *why;
 } reserved_pin_t;
+
+#if CDK_BOARD_IS_V1
+
+static const reserved_pin_t RESERVED[] = {
+    {0,  "ブートストラップ"},
+    {CDK_BOARD_USB_VBUS_EN, "USB VBUS 制御"},
+    {CDK_BOARD_BATT_ADC_GPIO, "電池電圧の分圧 (ADC)"},
+
+    {CDK_BOARD_LCD_BL,   "LCD バックライト"},
+    {CDK_BOARD_LCD_DC,   "LCD DC"},
+    {CDK_BOARD_LCD_CS,   "LCD CS"},
+    {CDK_BOARD_LCD_MOSI, "LCD MOSI"},
+    {CDK_BOARD_LCD_SCLK, "LCD SCLK"},
+    {CDK_BOARD_LCD_MISO, "LCD MISO"},
+    {CDK_BOARD_LCD_RST,  "LCD RESET"},
+
+    {CDK_BOARD_SD_MISO, "microSD MISO"},
+    {CDK_BOARD_SD_MOSI, "microSD MOSI"},
+    {CDK_BOARD_SD_CS,   "microSD CS"},
+    {CDK_BOARD_SD_SCLK, "microSD SCLK"},
+
+    {CDK_BOARD_USB_DM, "USB D-"},
+    {CDK_BOARD_USB_DP, "USB D+"},
+
+    /* ここを触ると PC と話せなくなる。いちばん気づきにくい壊れ方。 */
+    {CDK_BOARD_LINK_UART_RX, "制御チャネル RX (cdk_proto)"},
+    {CDK_BOARD_LINK_UART_TX, "制御チャネル TX (cdk_proto)"},
+    {CDK_BOARD_LOG_UART_TX,  "ログ UART TX / 書き込み"},
+    {CDK_BOARD_LOG_UART_RX,  "ログ UART RX / 書き込み"},
+};
+
+/* Grove の I2C (G17/G18) と ADC (G1/G2)、外部 UART (G47/G48) は
+ * **わざと空けてある。** そこへ繋ぐための端子なので、塞ぐと
+ * i2c_open も uart_open も自分の基板のコネクタに繋げなくなる。 */
+
+#else /* CoreS3 */
 
 static const reserved_pin_t RESERVED[] = {
     {0,  "ブートストラップ / I2S MCLK"},
@@ -52,6 +96,8 @@ static const reserved_pin_t RESERVED[] = {
     {47, "カメラ D7"},
     {48, "カメラ D6"},
 };
+
+#endif
 
 bool cdk_gpio_is_reserved(int pin, const char **why)
 {
@@ -195,10 +241,19 @@ esp_err_t cdk_i2c_scan(int sda, int scl, uint32_t freq_hz, cdk_periph_out_fn out
     if (sda < 0 || scl < 0 || sda == scl) {
         return ESP_ERR_INVALID_ARG;
     }
-    /* 内蔵バスは BSP が握っている。同じピンで 2 つ目のマスタは作れないので、
-     * 分かりにくいエラーになる前にここで止める。 */
+#if CDK_BOARD_HAS_BSP
+    /* CoreS3 の内蔵バスは BSP が握っている。同じピンで 2 つ目のマスタは
+     * 作れないので、分かりにくいエラーになる前にここで止める。
+     * v1 に G11/G12 は無い（そちらでは LCD の MOSI/SCLK で、予約表が弾く）。 */
     if (sda == 12 || scl == 11 || sda == 11 || scl == 12) {
         ESP_LOGE(TAG, "G11/G12 は内蔵 I2C (BSP が使用中) です");
+        return ESP_ERR_INVALID_STATE;
+    }
+#endif
+    /* scan は I2C_NUM_1 を一時的に作って壊す。cdk_i2c_open が同じポートを
+     * 握っている間は作れないので、分かりにくいエラーになる前に断る。 */
+    if (cdk_i2c_is_open()) {
+        ESP_LOGE(TAG, "I2C は開かれています (アプリが使用中)");
         return ESP_ERR_INVALID_STATE;
     }
 

@@ -5,5 +5,5 @@
 idf_component_register(SRCS "port_wasm_vm.c" "port_wasm_natives.c"
                             "port_wasm.c" "port_wasm_backend.c"
                        INCLUDE_DIRS "include"
-                       REQUIRES cdk_wasm wasm3 port_periph port_storage
+                       REQUIRES cdk_wasm wasm3 port_periph port_storage port_net
                                 esp_timer esp_hw_support)

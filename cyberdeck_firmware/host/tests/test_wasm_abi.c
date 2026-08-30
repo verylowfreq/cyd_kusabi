@@ -24,6 +24,31 @@ static int f_delay(void *u, int ms)
     return CDK_E_OK;
 }
 
+/* 「待っている間にメインループが汲む」を再現する delay。
+ * 実機で con_write が待たされたときに起きることと同じ形。 */
+static cdk_wasm_ctx_t *g_drain_ctx;
+static char            g_drained[CDK_WASM_OUT_BYTES * 4];
+static int             g_drained_len;
+
+static int f_delay_drains(void *u, int ms)
+{
+    ((fake_t *)u)->delay_total += ms;
+    if (g_drain_ctx) {
+        /* メインループと同じく、1 回で全部は汲まない */
+        const int n = cdk_wasm_drain_out(g_drain_ctx, g_drained + g_drained_len, 256);
+        if (n > 0) g_drained_len += n;
+    }
+    return CDK_E_OK;
+}
+
+/* 待っている最中に Ctrl-C が来る場合。 */
+static int f_delay_stops(void *u, int ms)
+{
+    ((fake_t *)u)->delay_total += ms;
+    if (g_drain_ctx) cdk_wasm_request_stop(g_drain_ctx);
+    return CDK_E_ABORT;
+}
+
 static void *f_open(void *u, const char *path, int mode)
 {
     fake_t *f = (fake_t *)u;
@@ -394,15 +419,66 @@ static void test_console(void)
         T_EQ_MEM(buf, "\033[A", 3);
     }
 
-    T_CASE("溢れても止まらず、捨てた量を数える");
+    T_CASE("リングより大きい出力でも 1 バイトも落とさない");
     {
+        /* メインループは 1 周でリングの一部しか汲まない。追い越した
+         * ぶんを捨てると、ファイルを読んで出し続けるアプリの出力が
+         * 画面から静かに消える。捨てずに待つのが正しい。
+         *
+         * 偽の delay_ms が「メインループが汲む」役をする。実機で
+         * 起きることと同じ形にしてある。 */
+        g_drain_ctx = &c;
+        g_drained_len = 0;
+        host.delay_ms = f_delay_drains;
+        cdk_wasm_ctx_init(&c, &host);
+
+        static char big[CDK_WASM_OUT_BYTES * 3 + 77];
+        for (size_t i = 0; i < sizeof big; i++) big[i] = (char)('a' + (i % 26));
+
+        T_EQ_INT(cdk_wasm_con_write(&c, big, (int)sizeof big), (int)sizeof big);
+
+        /* 残っているぶんも汲み切る */
+        for (;;) {
+            const int n = cdk_wasm_drain_out(&c, g_drained + g_drained_len,
+                                             (int)(sizeof g_drained) - g_drained_len);
+            if (n <= 0) break;
+            g_drained_len += n;
+        }
+
+        T_EQ_INT(c.dropped, 0);
+        T_EQ_INT(g_drained_len, (int)sizeof big);
+        T_EQ_MEM(g_drained, big, sizeof big);
+
+        host.delay_ms = f_delay; /* 元に戻す */
+    }
+
+    T_CASE("待つ手段が無いときだけ捨て、捨てた量を数える");
+    {
+        /* delay_ms を持たないバックエンドでは待てない。そのときは
+         * 捨てるしかないが、黙って捨てずに数えて終了時に報告する。 */
+        cdk_wasm_host_t nodelay = host;
+        nodelay.delay_ms = NULL;
+        cdk_wasm_ctx_init(&c, &nodelay);
+
         static char big[CDK_WASM_OUT_BYTES * 2];
         memset(big, 'z', sizeof big);
-        /* con_write は「受け取ったことにして」返る。止まらないのが大事 */
         T_EQ_INT(cdk_wasm_con_write(&c, big, (int)sizeof big), (int)sizeof big);
-        T_CHECK(c.dropped > 0);
         T_EQ_INT(c.dropped, (int)sizeof big - (CDK_WASM_OUT_BYTES - 1));
     }
+
+    T_CASE("待っている間に Ctrl-C が来たら ABORT で返る");
+    {
+        cdk_wasm_host_t stopping = host;
+        stopping.delay_ms = f_delay_stops;
+        cdk_wasm_ctx_init(&c, &stopping);
+        g_drain_ctx = &c;
+
+        static char big[CDK_WASM_OUT_BYTES * 2];
+        memset(big, 'z', sizeof big);
+        T_EQ_INT(cdk_wasm_con_write(&c, big, (int)sizeof big), CDK_E_ABORT);
+    }
+
+    cdk_wasm_ctx_init(&c, &host); /* 以降のケースのために作り直す */
 
     T_CASE("端末の大きさ");
     {

@@ -1,4 +1,4 @@
-/* `wasm` コマンド。ユーザーアプリの起動と停止。
+/* `wasm` コマンド。ユーザーアプリの起動。止めるのは Ctrl-C（main.c）。
  *
  * ここは **セッションを切り替えて即 return する**。`edit` と同じ作法で、
  * コマンドの中で待たない。待つとメインループが止まり、画面もキーも死ぬ。
@@ -19,9 +19,10 @@ static void usage(cdk_shell_t *sh)
     cdk_shell_write(sh,
                     "使い方:\r\n"
                     "  wasm run <file> [引数...]  microSD の .wasm を走らせる\r\n"
-                    "  wasm stop                  動いているアプリを止める\r\n"
                     "  wasm ls [dir]              置いてあるアプリを並べる（既定 apps）\r\n"
-                    "  wasm info                  ABI と上限\r\n");
+                    "  wasm info                  ABI と上限\r\n"
+                    "\r\n"
+                    "動いているアプリは Ctrl-C で止める。\r\n");
 }
 
 /* apps/ に何が置いてあるか。ls の代わりに .wasm だけ拾う。 */
@@ -115,15 +116,10 @@ static int cmd_wasm(int argc, char **argv, void *user)
         return 0;
     }
 
-    if (strcmp(argv[1], "stop") == 0) {
-        if (!cdk_wasm_run_busy()) {
-            cdk_shell_write(sh, "動いているアプリはありません\r\n");
-            return 1;
-        }
-        cdk_wasm_run_stop();
-        cdk_shell_write(sh, "止めるよう伝えました\r\n");
-        return 0;
-    }
+    /* `wasm stop` は置かない。**アプリが走っている間はシェルが止まって
+     * いる**（enter_wasm が cdk_shell_end を呼ぶ）ので、この表に入る道が
+     * 無く、書いても「動いているアプリはありません」としか言えない。
+     * 止める手段は Ctrl-C だけで、main.c の route_key が横取りする。 */
 
     if (strcmp(argv[1], "run") != 0) { usage(sh); return 1; }
     if (argc < 3) { usage(sh); return 1; }
@@ -142,7 +138,7 @@ static int cmd_wasm(int argc, char **argv, void *user)
 }
 
 const cdk_shell_cmd_t APP_WASM_COMMANDS[] = {
-    {"wasm", "wasm run <file> [引数...] | stop | ls | info", cmd_wasm},
+    {"wasm", "wasm run <file> [引数...] | ls | info（止めるのは Ctrl-C）", cmd_wasm},
 };
 const size_t APP_WASM_COMMANDS_COUNT =
     sizeof(APP_WASM_COMMANDS) / sizeof(APP_WASM_COMMANDS[0]);
