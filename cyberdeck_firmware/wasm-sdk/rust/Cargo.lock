@@ -3,8 +3,36 @@
 version = 4
 
 [[package]]
+name = "blink"
+version = "0.1.0"
+dependencies = [
+ "cdk-app",
+]
+
+[[package]]
+name = "boom"
+version = "0.1.0"
+dependencies = [
+ "cdk-app",
+]
+
+[[package]]
 name = "cdk-app"
 version = "0.1.0"
+
+[[package]]
+name = "du"
+version = "0.1.0"
+dependencies = [
+ "cdk-app",
+]
+
+[[package]]
+name = "echo"
+version = "0.1.0"
+dependencies = [
+ "cdk-app",
+]
 
 [[package]]
 name = "f_rust"
@@ -14,7 +42,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "flood"
+version = "0.1.0"
+dependencies = [
+ "cdk-app",
+]
+
+[[package]]
 name = "hello"
+version = "0.1.0"
+dependencies = [
+ "cdk-app",
+]
+
+[[package]]
+name = "httpget"
+version = "0.1.0"
+dependencies = [
+ "cdk-app",
+]
+
+[[package]]
+name = "i2cscan"
+version = "0.1.0"
+dependencies = [
+ "cdk-app",
+]
+
+[[package]]
+name = "spin"
+version = "0.1.0"
+dependencies = [
+ "cdk-app",
+]
+
+[[package]]
+name = "uartecho"
 version = "0.1.0"
 dependencies = [
  "cdk-app",

@@ -16,8 +16,14 @@
 
 static const char *TAG = "cdk_link";
 
-#define LINK_RX_RING 2048
+/* 受信リング。**1 フレームぶん (4KB) を超えて余裕を持たせる。**
+ * メインループが画面を流している間も届き続けるので、そこを吸える大きさが要る。 */
+#define LINK_RX_RING 8192
 #define LINK_TX_RING 4096
+
+/* cdk_link_poll が 1 周で汲む上限。これを超えたら次の周に回して、
+ * 流し込まれ続けたときにメインループが止まらないようにする。 */
+#define LINK_POLL_MAX 8192
 
 /* 1 回の usb_serial_jtag_write_bytes に渡す最大バイト数。
  * この API は内部でリングバッファに丸ごと積むので、リングより大きい書き込みは
@@ -165,15 +171,33 @@ void cdk_link_poll(uint32_t wait_ms)
         vTaskDelay(pdMS_TO_TICKS(wait_ms));
         return;
     }
-    uint8_t buf[256];
+    /* **溜まっているぶんは 1 周で汲み切る。**
+     *
+     * 1 回 256 バイトだけ読んで帰ると、921600 baud（約 92 バイト/ms）に対して
+     * メインループ 1 周ぶん（5ms 強）で 500 バイト以上届くので追いつかない。
+     * リングが溢れたぶんは黙って捨てられ、フレームがまるごと落ちる。
+     * ファイル転送 (cdk.py push) で実際に踏んだ。**1 フレームで収まる
+     * 送り物しか無いうちは表に出なかった。**
+     *
+     * 最初の 1 回だけ待ち、あとは残りが無くなるまで待たずに読む。
+     * 上限を置いて、流し込まれ続けたときにメインループを止めないようにする。 */
+    uint8_t   buf[256];
+    uint32_t  wait = wait_ms;
+    size_t    total = 0;
+
+    while (total < LINK_POLL_MAX) {
 #if CDK_BOARD_LINK_IS_USB_SERIAL_JTAG
-    const int n = usb_serial_jtag_read_bytes(buf, sizeof(buf), pdMS_TO_TICKS(wait_ms));
+        const int n = usb_serial_jtag_read_bytes(buf, sizeof(buf), pdMS_TO_TICKS(wait));
 #else
-    const int n = uart_read_bytes(CDK_BOARD_LINK_UART, buf, sizeof(buf),
-                                  pdMS_TO_TICKS(wait_ms));
+        const int n = uart_read_bytes(CDK_BOARD_LINK_UART, buf, sizeof(buf),
+                                      pdMS_TO_TICKS(wait));
 #endif
-    if (n > 0) {
+        if (n <= 0) {
+            break;
+        }
         cdk_proto_rx_feed(&s_rx, buf, (size_t)n);
+        total += (size_t)n;
+        wait = 0; /* 2 回目からは待たない */
     }
 }
 
