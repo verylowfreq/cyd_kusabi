@@ -429,8 +429,13 @@ static void erase_display(cdk_term_t *t)
         cdk__fill(t, 0, t->cy, t->cx, t->cy);
         break;
     case 2:
-    case 3: /* スクロールバックは持たないので 3 も 2 と同じ */
         cdk__fill(t, 0, 0, t->cols - 1, t->rows - 1);
+        break;
+    case 3:
+        /* 3J は「画面 + スクロールバック」。履歴を持つようになったので
+         * 2J とは別の意味になった。遡っている最中にも来る。 */
+        cdk__fill(t, 0, 0, t->cols - 1, t->rows - 1);
+        cdk_term_hist_clear(t);
         break;
     default:
         t->stat_unknown++;
@@ -625,7 +630,13 @@ static void csi_dispatch(cdk_term_t *t, uint8_t b)
     case 'P': cdk__delete_chars(t, p_at(t, 0, 1)); break;
     case 'X': cdk__erase_chars(t, p_at(t, 0, 1)); break;
     case '@': cdk__insert_chars(t, p_at(t, 0, 1)); break;
-    case 'S': cdk__scroll_up(t, p_at(t, 0, 1)); break;
+    case 'S': {
+        /* SU も画面から行を追い出す。LF と同じく履歴へ写してから。 */
+        const int n = p_at(t, 0, 1);
+        cdk__hist_push(t, n);
+        cdk__scroll_up(t, n);
+        break;
+    }
     case 'T': cdk__scroll_down(t, p_at(t, 0, 1)); break;
     case 'h': /* SM */
     case 'l': { /* RM */

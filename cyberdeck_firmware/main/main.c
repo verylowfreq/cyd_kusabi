@@ -118,6 +118,11 @@ static cdk_edit_t s_edit;
 static char      *s_edit_arena;
 #define EDIT_ARENA_BYTES (128 * 1024)
 
+/* スクロールバックの行数。1 行 = 桁数 x 16 バイトなので、
+ * 80 桁なら 256KB、40 桁（2 倍表示）なら 128KB。PSRAM から取る。
+ * 200 行はいまの画面 8 枚ぶんで、あふれた出力を遡るには足りる。 */
+#define SCROLLBACK_LINES 200
+
 /* ------------------------------------------------------------------ */
 /* セッション                                                          */
 /* ------------------------------------------------------------------ */
@@ -244,6 +249,41 @@ static void route_key(void *user, const cdk_key_t *k)
         term_printf("\033[33mssh   : 再接続をやめました\033[0m\r\n");
         s_dirty = true;
         return;
+    }
+
+    /* ---- スクロールバック ----
+     *
+     * **位置は動かせない。**
+     *  - これより下（SKK の下）だと、`▽` 変換中に SKK が文字にならない
+     *    キーを外へ漏らさないので、変換中だけ効かなくなる。
+     *  - さらに下（EDIT / WASM / SSH の分岐）はどれも無条件に return するので、
+     *    シェル以外では一生届かない。
+     *  - これより上（再接続の中止）は「どのキーでも中止する」契約を壊す。
+     *    そのぶん、再接続を待っている間はスクロールが効かない。
+     *
+     * Shift+PgUp / PgDn は端末の慣例で、SSH 先へは送らないのが普通なので
+     * `vi` や `less` と衝突しない。 */
+    if ((k->mods & CDK_MOD_SHIFT_BIT) != 0u &&
+        (k->keycode == CDK_K_PGUP || k->keycode == CDK_K_PGDN)) {
+        /* 1 画面ぶん。1 行重ねると読みつなぎやすい。 */
+        int step = s_term.rows - 1;
+        if (step < 1) {
+            step = 1;
+        }
+        const int moved =
+            cdk_term_view_scroll(&s_term, (k->keycode == CDK_K_PGUP) ? step : -step);
+        if (moved != 0) {
+            s_dirty = true;
+            return; /* 動けたときだけ消費する */
+        }
+        /* 動けないなら消費しない。代替画面（エディタや vi）では履歴が
+         * 無効なので、そのまま下へ落ちて PgUp として扱われる。 */
+    } else if (cdk_term_view_offset(&s_term) > 0) {
+        /* **何か打ったら最下部へ戻す。** 遡ったまま入力すると、
+         * 打った字が見えないところへ出ていって混乱する。
+         * キーは消費せずそのまま下へ流す。 */
+        cdk_term_view_reset(&s_term);
+        s_dirty = true;
     }
 
     /* 日本語入力はシェル / SSH の分岐より**前**に置く。ここを分岐の
@@ -501,6 +541,7 @@ static void draw_status(bool force)
     st.ime = cdk_skk_mode_label(&s_skk);
     st.kbd = cdk_usbhid_connected();
     st.ssh_up = cdk_ssh_is_open();
+    st.scroll_back = cdk_term_view_offset(&s_term);
 
     char line[160];
     cdk_status_format(&st, s_term.cols, line, sizeof(line));
@@ -955,6 +996,21 @@ void app_main(void)
     }
     cdk_term_set_reply(&s_term, on_term_reply, NULL);
     ESP_LOGI(TAG, "端末 %d桁 x %d行 (%u バイト)", cols, rows, (unsigned)tmem);
+
+    /* スクロールバック。**内部 DRAM には置かない**（空きはあっても最大ブロックが
+     * 30KB ほどしかない）。取れなくても起動は続ける。遡れなくなるだけ。 */
+    {
+        const size_t hmem = cdk_term_hist_mem_size(cols, SCROLLBACK_LINES);
+        void *hp = heap_caps_malloc(hmem, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (hp != NULL && cdk_term_set_history(&s_term, hp, hmem, SCROLLBACK_LINES)) {
+            ESP_LOGI(TAG, "スクロールバック %d 行 (%u バイト)",
+                     SCROLLBACK_LINES, (unsigned)hmem);
+        } else {
+            free(hp);
+            ESP_LOGW(TAG, "スクロールバックを確保できません (%u バイト)",
+                     (unsigned)hmem);
+        }
+    }
 
     /* **端末を作ったあとで呼ぶ。** 中で s_term をダーティにするので、
      * cdk_term_init より前だと未初期化の領域を触ることになる。 */

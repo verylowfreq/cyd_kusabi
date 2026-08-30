@@ -13,6 +13,14 @@ void cdk__fill(cdk_term_t *t, int x0, int y0, int x1, int y1);
 /* 全角ペアの片割れを潰さないように、そのセルと相方をまとめて空白にする */
 void cdk__clear_cell(cdk_term_t *t, int x, int y);
 
+/* 画面から出ていく行を履歴へ写す。**cdk__scroll_up の直前に呼ぶ。**
+ *
+ * cdk__scroll_up の中では呼ばない。あの関数は DL (`CSI M`) からも
+ * 呼ばれ、そこは t->top をすり替えているので、vi の行削除が
+ * 履歴に流れ込む。呼ぶのは「画面から永久に消える」経路だけ。
+ * 積む条件（代替画面でない・領域が全画面）は中で見る。 */
+void cdk__hist_push(cdk_term_t *t, int n);
+
 void cdk__scroll_up(cdk_term_t *t, int n);
 void cdk__scroll_down(cdk_term_t *t, int n);
 

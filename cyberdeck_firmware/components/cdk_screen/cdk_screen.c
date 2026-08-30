@@ -392,20 +392,36 @@ void cdk_screen_draw(cdk_screen_t *s, cdk_canvas_t *cv, cdk_term_t *t, bool all)
     const int rows = (t->rows < cdk_screen_rows(s, cv->h)) ? t->rows
                                                            : cdk_screen_rows(s, cv->h);
 
+    /* **スクロールバックを遡っている間は全行描く。**
+     *
+     * ダーティは画面の行に対する印で、遡っていると表示行とずれる
+     * （表示行 y が画面行 y - view_off を映している）。ずれた印で間引くと、
+     * 描き直すべき行を飛ばしたり関係ない行を描いたりする。遡っている間は
+     * 毎周全部描くのがいちばん確実で、費用も人が読んでいる間だけ。
+     *
+     * **判定はここでする。** 呼び出し側に all=true を書いて回ると、
+     * 直し忘れた経路だけ古い絵が残る。 */
+    const bool scrolled = cdk_term_view_offset(t) > 0;
+    const bool draw_all = all || scrolled;
+
     for (int y = 0; y < rows; y++) {
-        if (!all && !cdk_term_line_dirty(t, y)) {
+        if (!draw_all && !cdk_term_line_dirty(t, y)) {
             continue;
         }
         const cdk_cell_t *line = cdk_term_row(t, y);
         for (int x = 0; x < cols; x++) {
-            const bool cursor = t->cursor_visible && x == t->cx && y == t->cy;
+            /* 遡っている間はカーソルを描かない。見ている行は入力位置とは
+             * 関係がないので、出すと嘘になる。 */
+            const bool cursor =
+                !scrolled && t->cursor_visible && x == t->cx && y == t->cy;
             cdk_screen_draw_cell(s, cv, &line[x], x, y, cursor);
         }
     }
 
     /* 未確定文字列は毎回いちばん上に描く。下の行が描き直されたときに
-     * 消えてしまわないよう、条件を付けずに重ねる。 */
-    if (s->preedit[0] != '\0') {
+     * 消えてしまわないよう、条件を付けずに重ねる。
+     * ただし遡っている間は出さない（t->cy を見ているので位置が嘘になる）。 */
+    if (s->preedit[0] != '\0' && !scrolled) {
         draw_preedit(s, cv, t);
     }
 

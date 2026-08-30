@@ -109,6 +109,12 @@ void cdk_term_reset(cdk_term_t *t)
     t->alt_active = false;
     t->cells = t->primary;
 
+    /* RIS は履歴も消す。領域そのものは呼び出し側のものなので外さない
+     * （hist / hist_cap は触らない）。 */
+    t->hist_len = 0;
+    t->hist_head = 0;
+    t->view_off = 0;
+
     reset_tabs(t);
     cdk_term_mark_all_dirty(t);
 }
@@ -265,6 +271,8 @@ void cdk__scroll_down(cdk_term_t *t, int n)
 void cdk__index(cdk_term_t *t)
 {
     if (t->cy == t->bot) {
+        /* 画面から出ていく行を履歴へ。**scroll_up の memmove で潰れる前に。** */
+        cdk__hist_push(t, 1);
         cdk__scroll_up(t, 1);
     } else if (t->cy < t->rows - 1) {
         t->cy++;
@@ -475,6 +483,10 @@ void cdk__switch_screen(cdk_term_t *t, bool to_alt)
     }
     t->alt_active = to_alt;
     t->cells = to_alt ? t->alternate : t->primary;
+    /* **alt_active が変わる唯一の場所なので、view はここで戻す。**
+     * 47 / 1047 / 1049 のどれで入っても取りこぼさない。
+     * 代替画面では履歴を積まないので、戻るときも 0 のままでよい。 */
+    t->view_off = 0;
     cdk_term_mark_all_dirty(t);
 }
 

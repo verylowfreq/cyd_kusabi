@@ -28,12 +28,22 @@ static void on_reply(void *user, const uint8_t *data, size_t len)
     }
 }
 
+/* 履歴つきの端末。lines 行ぶんの環を付ける。 */
+static uint8_t histmem[COLS * 16 * sizeof(cdk_cell_t)];
+static void setup_hist(int lines);
+
 static void setup(void)
 {
     T_CHECK(cdk_term_init(&T, COLS, ROWS, mem, sizeof(mem)));
     cdk_term_set_reply(&T, on_reply, NULL);
     reply_len = 0;
     reply_buf[0] = '\0';
+}
+
+static void setup_hist(int lines)
+{
+    setup();
+    T_CHECK(cdk_term_set_history(&T, histmem, sizeof(histmem), lines));
 }
 
 static void feed(const char *s)
@@ -639,6 +649,240 @@ int main(void)
         reply_buf[0] = '\0';
         feed("\033[6n");
         T_CHECK(strcmp(reply_buf, "\033[1;2R") == 0); /* 領域内での行番号 */
+    }
+
+    /* ---- スクロールバック ---- */
+
+    T_CASE("履歴を付けなければ今までと同じ");
+    {
+        /* cdk_render（ホストの基準レンダラ）は set_history を呼ばない。
+         * ここが崩れると shot --verify の比較が動く。 */
+        setup();
+        T_EQ_INT(cdk_term_hist_len(&T), 0);
+        T_EQ_INT(cdk_term_view_offset(&T), 0);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7");
+        T_EQ_INT(cdk_term_hist_len(&T), 0);
+        eq_trim(0, "2");
+        /* 遡ろうとしても動かない */
+        T_EQ_INT(cdk_term_view_scroll(&T, 3), 0);
+        eq_trim(0, "2");
+    }
+
+    T_CASE("最下行の改行で 1 行ずつ積まれる");
+    {
+        setup_hist(4);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6"); /* ここまでで画面が埋まる */
+        T_EQ_INT(cdk_term_hist_len(&T), 0);
+        feed("\r\n7");
+        T_EQ_INT(cdk_term_hist_len(&T), 1);
+        feed("\r\n8");
+        T_EQ_INT(cdk_term_hist_len(&T), 2);
+    }
+
+    T_CASE("環が一周しても壊れない");
+    {
+        setup_hist(3); /* 3 行しか持たない */
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6");
+        for (int i = 7; i <= 20; i++) {
+            char buf[16];
+            snprintf(buf, sizeof buf, "\r\n%d", i);
+            feed(buf);
+        }
+        T_EQ_INT(cdk_term_hist_len(&T), 3); /* 頭打ち */
+
+        /* いちばん古い 3 行は 12/13/14（画面には 15..20 が残る） */
+        cdk_term_view_scroll(&T, 3);
+        T_EQ_INT(cdk_term_view_offset(&T), 3);
+        eq_trim(0, "12");
+        eq_trim(1, "13");
+        eq_trim(2, "14");
+        eq_trim(3, "15"); /* ここから画面 */
+    }
+
+    T_CASE("遡ったときの行の対応（つなぎ目）");
+    {
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
+        /* 画面は 4..9、履歴は 1,2,3 */
+        T_EQ_INT(cdk_term_hist_len(&T), 3);
+
+        cdk_term_view_scroll(&T, 2);
+        T_EQ_INT(cdk_term_view_offset(&T), 2);
+        eq_trim(0, "2");          /* 履歴 */
+        eq_trim(1, "3");          /* 履歴。ここがつなぎ目 */
+        eq_trim(2, "4");          /* 画面の先頭 */
+        eq_trim(ROWS - 1, "7");   /* 画面が 2 行ぶん上へずれて見える */
+    }
+
+    T_CASE("遡る量は履歴の長さで頭打ち");
+    {
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7"); /* 履歴は 1 行 */
+        T_EQ_INT(cdk_term_hist_len(&T), 1);
+        T_EQ_INT(cdk_term_view_scroll(&T, 100), 1); /* 動けたのは 1 行だけ */
+        T_EQ_INT(cdk_term_view_offset(&T), 1);
+        T_EQ_INT(cdk_term_view_scroll(&T, 100), 0); /* もう動けない */
+
+        T_EQ_INT(cdk_term_view_scroll(&T, -100), -1);
+        T_EQ_INT(cdk_term_view_offset(&T), 0);
+        T_EQ_INT(cdk_term_view_scroll(&T, -100), 0);
+    }
+
+    T_CASE("遡っている最中に新着が来ても見ている行は動かない");
+    {
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+        cdk_term_view_scroll(&T, 2);
+        const char *before = trimmed(0);
+        char keep[32];
+        snprintf(keep, sizeof keep, "%s", before);
+
+        feed("\r\n9"); /* 新しい行が積まれる */
+        eq_trim(0, keep);            /* 見ている位置は同じ中身のまま */
+        T_EQ_INT(cdk_term_view_offset(&T), 3); /* オフセットは 1 増える */
+    }
+
+    T_CASE("代替画面では積まれない");
+    {
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6");
+        feed("\033[?1049h"); /* 代替画面へ */
+        const int before = cdk_term_hist_len(&T);
+        feed("a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh");
+        T_EQ_INT(cdk_term_hist_len(&T), before); /* 増えていない */
+        feed("\033[?1049l");
+        T_EQ_INT(cdk_term_hist_len(&T), before);
+    }
+
+    T_CASE("代替画面では遡れない");
+    {
+        /* 履歴は主画面のもの。代替画面の上に描くと画面が壊れる。
+         * **実機のエディタで踏んだ。** 0 を返すので呼び出し側はキーを
+         * 消費せず、エディタの PgUp として流せる。 */
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+        T_CHECK(cdk_term_hist_len(&T) > 0);
+
+        feed("\033[?1049h");
+        T_EQ_INT(cdk_term_view_scroll(&T, 3), 0);
+        T_EQ_INT(cdk_term_view_offset(&T), 0);
+
+        /* 主画面へ戻れば遡れる */
+        feed("\033[?1049l");
+        T_CHECK(cdk_term_view_scroll(&T, 3) > 0);
+    }
+
+    T_CASE("代替画面へ入ると最下部へ戻る");
+    {
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+        cdk_term_view_scroll(&T, 2);
+        T_EQ_INT(cdk_term_view_offset(&T), 2);
+        feed("\033[?1049h");
+        T_EQ_INT(cdk_term_view_offset(&T), 0);
+    }
+
+    T_CASE("DL (CSI M) では積まれない");
+    {
+        /* DL は t->top を cy にすり替えて cdk__scroll_up を呼ぶ。
+         * そこで積むと vi や less の行削除が履歴に流れ込む。 */
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6");
+        const int before = cdk_term_hist_len(&T);
+        feed("\033[1;1H");   /* 最上行へ */
+        feed("\033[M");      /* 1 行削除 */
+        T_EQ_INT(cdk_term_hist_len(&T), before);
+        feed("\033[3;1H\033[2M"); /* 途中でも */
+        T_EQ_INT(cdk_term_hist_len(&T), before);
+    }
+
+    T_CASE("スクロール領域が全画面でないときは積まれない");
+    {
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6");
+        const int before = cdk_term_hist_len(&T);
+
+        /* 上端はそのままで下だけ狭める。top == 0 だけ見ていると誤って積む */
+        feed("\033[1;4r");
+        feed("\033[4;1H");   /* 領域の最下行 */
+        feed("\r\na\r\nb\r\nc");
+        T_EQ_INT(cdk_term_hist_len(&T), before);
+
+        /* 領域を戻せばまた積む */
+        feed("\033[r");
+        feed("\033[6;1H\r\nx");
+        T_CHECK(cdk_term_hist_len(&T) > before);
+    }
+
+    T_CASE("SU (CSI S) は積む");
+    {
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6");
+        const int before = cdk_term_hist_len(&T);
+        feed("\033[2S");
+        T_EQ_INT(cdk_term_hist_len(&T), before + 2);
+        cdk_term_view_scroll(&T, 2);
+        eq_trim(0, "1");
+        eq_trim(1, "2");
+    }
+
+    T_CASE("遡っている最中の CSI 3J で履歴も view も消える");
+    {
+        /* 戻し忘れると cdk_term_row が環の外を読む。 */
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+        cdk_term_view_scroll(&T, 2);
+        T_CHECK(cdk_term_hist_len(&T) > 0);
+        T_EQ_INT(cdk_term_view_offset(&T), 2);
+
+        feed("\033[3J");
+        T_EQ_INT(cdk_term_hist_len(&T), 0);
+        T_EQ_INT(cdk_term_view_offset(&T), 0);
+
+        /* 2J は履歴を消さない */
+        feed("a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng");
+        const int n = cdk_term_hist_len(&T);
+        T_CHECK(n > 0);
+        feed("\033[2J");
+        T_EQ_INT(cdk_term_hist_len(&T), n);
+    }
+
+    T_CASE("RIS は履歴も消す");
+    {
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+        cdk_term_view_scroll(&T, 2);
+        feed("\033c");
+        T_EQ_INT(cdk_term_hist_len(&T), 0);
+        T_EQ_INT(cdk_term_view_offset(&T), 0);
+    }
+
+    T_CASE("set_history を呼び直すと捨てる");
+    {
+        setup_hist(8);
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+        cdk_term_view_scroll(&T, 2);
+        T_CHECK(cdk_term_hist_len(&T) > 0);
+
+        /* 行数を変えると環の巻き方が変わる。古い view_off が残ると外を指す。 */
+        T_CHECK(cdk_term_set_history(&T, histmem, sizeof histmem, 4));
+        T_EQ_INT(cdk_term_hist_len(&T), 0);
+        T_EQ_INT(cdk_term_view_offset(&T), 0);
+
+        /* 外すこともできる */
+        T_CHECK(cdk_term_set_history(&T, NULL, 0, 0));
+        T_EQ_INT(cdk_term_hist_len(&T), 0);
+        feed("\r\n9");
+        T_EQ_INT(cdk_term_hist_len(&T), 0);
+    }
+
+    T_CASE("領域が足りなければ断る");
+    {
+        setup();
+        T_EQ_U32((unsigned long)cdk_term_hist_mem_size(COLS, 4),
+                 (unsigned long)(COLS * 4 * sizeof(cdk_cell_t)));
+        T_EQ_U32((unsigned long)cdk_term_hist_mem_size(0, 4), 0ul);
+        T_CHECK(!cdk_term_set_history(&T, histmem, 8, 4));
     }
 
     return t_report("test_term");

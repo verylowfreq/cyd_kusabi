@@ -140,6 +140,15 @@ typedef struct {
     cdk_term_reply_fn reply;
     void             *reply_user;
 
+    /* ---- スクロールバック ----
+     * hist_cap が 0 なら履歴なし。**呼ばなければ今までとまったく同じ挙動**で、
+     * ホストの基準レンダラ (cdk_render) はそのまま使う。 */
+    cdk_cell_t *hist;      /* 環状。cols * hist_cap セル */
+    int         hist_cap;  /* 0 = 履歴なし */
+    int         hist_len;  /* 貯まっている行数 (<= hist_cap) */
+    int         hist_head; /* 次に書く位置 */
+    int         view_off;  /* 0 = 最新。n = n 行遡っている */
+
     /* 診断用 */
     uint32_t stat_unknown; /* 捨てたシーケンスの数 */
 } cdk_term_t;
@@ -158,15 +167,54 @@ void cdk_term_reset(cdk_term_t *t);
 /* 出力バイト列を食わせる。分割されていてよい。 */
 void cdk_term_feed(cdk_term_t *t, const void *data, size_t len);
 
+/* ---- スクロールバック ----
+ *
+ * 履歴は呼び出し側が用意した領域に置く。**cdk_term_init の形は変えない**ので、
+ * set_history を呼ばない使い方（cdk_render・多くのテスト）は今までと同じ。
+ */
+
+/* cols x lines に要るバイト数。 */
+size_t cdk_term_hist_mem_size(int cols, int lines);
+
+/* 履歴を付ける。mem == NULL / lines <= 0 なら外す。
+ * **2 回目の呼び出しは中身を捨てる**（行数が変わると環の巻き方が変わる）。 */
+bool cdk_term_set_history(cdk_term_t *t, void *mem, size_t mem_size, int lines);
+
+int  cdk_term_hist_len(const cdk_term_t *t);
+int  cdk_term_view_offset(const cdk_term_t *t);
+/* 遡る (delta > 0) / 戻る (delta < 0)。実際に動いた量を返す。 */
+int  cdk_term_view_scroll(cdk_term_t *t, int delta);
+void cdk_term_view_reset(cdk_term_t *t);
+void cdk_term_hist_clear(cdk_term_t *t);
+
+/* 履歴の古いほうから i 行目。cdk_term_row が使う。 */
+const cdk_cell_t *cdk__hist_row(const cdk_term_t *t, int i);
+
 /* ---- 参照 ---- */
+
+/* 表示行 y の中身。
+ *
+ * 遡っている (view_off = k > 0) ときの対応:
+ *   y <  k : 履歴の (hist_len - k + y) 行目
+ *   y >= k : 画面の (y - k) 行目
+ *
+ * **k は hist_len で頭打ちにする。** 不変条件を信じて素通しすると、
+ * どこかで戻し忘れたときに落ちずに環の外のゴミを読む。 */
 static inline const cdk_cell_t *cdk_term_row(const cdk_term_t *t, int y)
 {
-    return t->cells + (size_t)y * (size_t)t->cols;
+    int k = t->view_off;
+    if (k > t->hist_len) {
+        k = t->hist_len;
+    }
+    if (k > 0 && y < k) {
+        return cdk__hist_row(t, t->hist_len - k + y);
+    }
+    return t->cells + (size_t)(y - k) * (size_t)t->cols;
 }
 
 static inline const cdk_cell_t *cdk_term_cell(const cdk_term_t *t, int x, int y)
 {
-    return t->cells + (size_t)y * (size_t)t->cols + (size_t)x;
+    return cdk_term_row(t, y) + (size_t)x;
 }
 
 static inline bool cdk_term_line_dirty(const cdk_term_t *t, int y)

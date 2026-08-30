@@ -63,6 +63,13 @@ size_t cdk_status_format(const cdk_status_t *st, int cols, char *out, size_t cap
 
     /* 前にあるものほど大事。入らない項目は後ろから落ちる。 */
 
+    /* 遡っているときは何より先に出す。画面が「いまの状態」でないことが
+     * 分からないと、固まったように見える。 */
+    if (st->scroll_back > 0) {
+        snprintf(seg, sizeof(seg), "^%d ", st->scroll_back);
+        (void)push(out, cap, &len, &w, cols, seg);
+    }
+
     if (st->wifi_up && st->ip != NULL && st->ip[0] != '\0') {
         snprintf(seg, sizeof(seg), "%s", st->ip);
     } else {
