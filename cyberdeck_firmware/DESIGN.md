@@ -1917,6 +1917,14 @@ C 版と同じで、**ABI を知っているのは 1 ファイルだけ**（`cdk
 `opt-level="z"` / `lto` / `codegen-units=1` / `panic="abort"` / `strip` を
 `Cargo.toml` に固定してある。`format!` の機構を積んで 7.5KB なので余裕がある。
 
+> **1MB という数は 4 か所にある。** 増やすときは全部直すこと。
+> `components_port/wasm3/CMakeLists.txt` と `host/CMakeLists.txt`
+> （`d_m3MaxLinearMemoryPages=16`、実機とホストで同じ値にする）、
+> `wasm-sdk/rust/.cargo/config.toml`（`--max-memory=1048576`）、
+> `tools/wasminfo.py`（`MAX_MEMORY_PAGES`）。
+> ピン番号や ABI の名前と同じ「複数箇所にある数」だが、いまは
+> 機械で突き合わせていない。`abi_names_match` を広げるならここが次の候補。
+
 **`--max-memory=1048576` を rustflags で明示している。** Rust の cdylib は
 指定しないと最大を「無制限」として出し、**ロードは通るのに走らせてから
 `memory.grow` で落ちる**という分かりにくい形になる。
