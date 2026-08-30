@@ -40,6 +40,13 @@ static struct {
 } s_devs[I2C_DEVS_MAX];
 static int s_ndevs;
 
+/* open で言われた速度。**デバイスを足すときに使う。**
+ * ESP-IDF の新しい I2C ドライバは、クロックをバスではなくデバイスごとに
+ * 持つ。ここに覚えておかないと dev_for() が既定値で足してしまい、
+ * 「400kHz と言ったのに 100kHz で動く」という、ログだけ正しくて実物が
+ * 違う状態になる。 */
+static uint32_t s_freq_hz;
+
 bool cdk_i2c_is_open(void) { return s_bus != NULL; }
 
 esp_err_t cdk_i2c_open(int sda, int scl, uint32_t freq_hz)
@@ -78,6 +85,7 @@ esp_err_t cdk_i2c_open(int sda, int scl, uint32_t freq_hz)
         return err;
     }
     s_ndevs = 0;
+    s_freq_hz = freq_hz;
     ESP_LOGI(TAG, "I2C 開始 SDA=G%d SCL=G%d %u Hz", sda, scl, (unsigned)freq_hz);
     return ESP_OK;
 }
@@ -96,7 +104,7 @@ static esp_err_t dev_for(int addr, i2c_master_dev_handle_t *out)
     const i2c_device_config_t dcfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = (uint16_t)addr,
-        .scl_speed_hz = 100000,
+        .scl_speed_hz = s_freq_hz, /* open で言われた速度。既定値で足さない */
     };
     i2c_master_dev_handle_t dev = NULL;
     const esp_err_t err = i2c_master_bus_add_device(s_bus, &dcfg, &dev);
@@ -146,6 +154,7 @@ esp_err_t cdk_i2c_close(void)
     s_ndevs = 0;
     const esp_err_t err = i2c_del_master_bus(s_bus);
     s_bus = NULL;
+    s_freq_hz = 0;
     return err;
 }
 
