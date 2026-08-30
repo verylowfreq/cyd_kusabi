@@ -31,6 +31,8 @@ static bool load_font(void)
     return cdk_font_open(&F, blob, got);
 }
 
+static uint8_t histmem2[COLS * 16 * sizeof(cdk_cell_t)];
+
 static void setup(void)
 {
     T_CHECK(cdk_term_init(&T, COLS, ROWS, termmem, sizeof(termmem)));
@@ -538,5 +540,106 @@ int main(void)
     }
 
     free(blob);
+    /* ---- スクロールバック ----
+     *
+     * **字の形では見分けない。** この検査で使える count_color は、
+     * どの字でも前景 60 / 背景 12 になり glyph を区別できない
+     * （既存のケースも「0 より大きい」までしか見ていない）。
+     * 代わりに「空白か、何か描かれているか」で見る。そこは
+     * 既存の「隣のセルは空白」と同じ確実な見方。 */
+
+    T_CASE("遡ると履歴の行が描かれ、戻すと元に戻る");
+    {
+        setup();
+        T_CHECK(cdk_term_set_history(&T, histmem2, sizeof(histmem2), 8));
+        T.cursor_visible = false;
+
+        /* 1 行目だけ 10 桁ぶん埋め、あとは 1 文字だけの行を流す。
+         * 長い行が履歴へ落ちたあと、画面の上端は短い行になる。 */
+        feed("AAAAAAAAAA\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh");
+        T_EQ_INT(cdk_term_hist_len(&T), 2); /* AAAA... と b が落ちた */
+
+        cdk_screen_draw(&S, &CV, &T, true);
+        /* いまの上端は "c"。9 桁目は空白。 */
+        T_EQ_INT(count_color(9, 0, 1, S.default_bg), CW * CH);
+
+        /* 2 行遡ると上端が "AAAAAAAAAA" になり、9 桁目に字が来る。 */
+        cdk_term_view_scroll(&T, 2);
+        cdk_canvas_clear(&CV, 0x1234u);
+        cdk_screen_draw(&S, &CV, &T, false); /* all=false でも全部描く */
+        T_EQ_INT(count_color(0, 0, 1, 0x1234u), 0);
+        T_CHECK(count_color(9, 0, 1, S.default_bg) < CW * CH);
+
+        /* 最下部へ戻すと空白に戻る。 */
+        cdk_term_view_reset(&T);
+        cdk_canvas_clear(&CV, 0x1234u);
+        cdk_screen_draw(&S, &CV, &T, false);
+        T_EQ_INT(count_color(9, 0, 1, S.default_bg), CW * CH);
+    }
+
+    T_CASE("遡っている間はダーティでない行も描き直す");
+    {
+        /* ダーティは画面行に対する印で、遡っていると表示行とずれる。
+         * 間引くと古い絵が残る。 */
+        setup();
+        T_CHECK(cdk_term_set_history(&T, histmem2, sizeof(histmem2), 8));
+        T.cursor_visible = false;
+
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9");
+        cdk_screen_draw(&S, &CV, &T, true);
+
+        cdk_term_view_scroll(&T, 2);
+        cdk_term_clear_dirty(&T); /* 印を消しても描かれること */
+        cdk_canvas_clear(&CV, 0x1234u);
+        cdk_screen_draw(&S, &CV, &T, false);
+        for (int y = 0; y < ROWS; y++) {
+            T_EQ_INT(count_color(0, y, 1, 0x1234u), 0);
+        }
+    }
+
+    T_CASE("遡っている間はカーソルを描かない");
+    {
+        setup();
+        T_CHECK(cdk_term_set_history(&T, histmem2, sizeof(histmem2), 8));
+
+        /* 空白のセルにカーソルを置く。カーソルがあれば反転して
+         * 背景でなくなるので、空白かどうかで見分けられる。 */
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+        feed("\033[1;10H"); /* 上端の 10 桁目。そこは空白 */
+        cdk_screen_draw(&S, &CV, &T, true);
+        T_CHECK(count_color(9, 0, 1, S.default_bg) < CW * CH); /* カーソルが居る */
+
+        cdk_term_view_scroll(&T, 2);
+        cdk_canvas_clear(&CV, 0x1234u);
+        cdk_screen_draw(&S, &CV, &T, false);
+        /* 遡っている間はカーソルを描かないので、そこは素の空白に戻る */
+        T_EQ_INT(count_color(9, 0, 1, S.default_bg), CW * CH);
+
+        cdk_term_view_reset(&T);
+        cdk_canvas_clear(&CV, 0x1234u);
+        cdk_screen_draw(&S, &CV, &T, false);
+        T_CHECK(count_color(9, 0, 1, S.default_bg) < CW * CH); /* 戻った */
+    }
+
+    T_CASE("遡っている間は未確定文字列を重ねない");
+    {
+        setup();
+        T_CHECK(cdk_term_set_history(&T, histmem2, sizeof(histmem2), 8));
+        T.cursor_visible = false;
+
+        feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8");
+        feed("\033[1;10H");
+        cdk_screen_set_preedit(&S, "A");
+        cdk_screen_draw(&S, &CV, &T, true);
+        T_CHECK(count_color(9, 0, 1, S.default_bg) < CW * CH); /* 未確定が出ている */
+
+        cdk_term_view_scroll(&T, 2);
+        cdk_canvas_clear(&CV, 0x1234u);
+        cdk_screen_draw(&S, &CV, &T, false);
+        T_EQ_INT(count_color(9, 0, 1, S.default_bg), CW * CH); /* 重なっていない */
+
+        cdk_screen_set_preedit(&S, "");
+    }
+
     return t_report("test_screen");
 }
