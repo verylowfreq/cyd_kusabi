@@ -1,0 +1,14 @@
+# ホストの ctest 用。Rust の SDK がファームと同じ ABI を話していることを、
+# 実機と同じコード (port_wasm_vm.c / port_wasm_natives.c) で確かめる。
+# 出来た .wasm は host/fixtures/wasm/f_rust.wasm にコミットしてある。
+[package]
+name = "f_rust"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cdk-app = { path = "../../cdk-app" }

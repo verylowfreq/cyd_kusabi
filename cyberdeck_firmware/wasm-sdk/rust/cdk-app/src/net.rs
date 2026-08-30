@@ -17,6 +17,7 @@ pub fn is_up() -> bool {
 }
 
 /// 繋がっている TCP。`Drop` で閉じる。
+#[derive(Debug)]
 pub struct TcpStream(i32);
 
 impl TcpStream {
@@ -99,6 +100,7 @@ impl Drop for TcpStream {
 }
 
 /// UDP。`Drop` で閉じる。
+#[derive(Debug)]
 pub struct UdpSocket(i32);
 
 impl UdpSocket {

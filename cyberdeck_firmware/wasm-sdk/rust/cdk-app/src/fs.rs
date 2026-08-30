@@ -48,6 +48,7 @@ pub enum Seek {
 ///
 /// `Drop` で閉じる。ただし **Ctrl-C でトラップして抜けたときは走らない**
 /// （ファーム側が片づけるので漏れはしない）。
+#[derive(Debug)]
 pub struct File(i32);
 
 impl File {
@@ -192,6 +193,7 @@ pub fn write(path: &str, data: &[u8]) -> Result<()> {
 /// ディレクトリの中身。名前だけを順に返す。
 ///
 /// `Drop` で閉じる（`File` と同じく、トラップで抜けたときは走らない）。
+#[derive(Debug)]
 pub struct ReadDir(i32);
 
 /// ディレクトリを開く。

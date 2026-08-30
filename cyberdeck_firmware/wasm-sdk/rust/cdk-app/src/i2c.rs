@@ -8,6 +8,7 @@ use crate::error::{Result, check_ok, len_i32};
 use crate::sys;
 
 /// 開いている I2C バス。`Drop` で閉じる。
+#[derive(Debug)]
 pub struct I2c(());
 
 impl I2c {

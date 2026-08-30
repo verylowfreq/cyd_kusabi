@@ -6,7 +6,7 @@
 # ターゲットは .cargo/config.toml で wasm32-unknown-unknown に固定してある。
 [workspace]
 resolver = "3"
-members = ["cdk-app", "apps/*"]
+members = ["cdk-app", "apps/*", "fixtures/*"]
 
 # 256KB の枠に収めるための設定。プロファイル任せにしない。
 [profile.release]

@@ -288,6 +288,40 @@ int main(void)
         T_EQ_STR(out, "");
     }
 
+    T_CASE("Rust の SDK が同じ ABI を話している");
+    {
+        /* **Rust クレートがファームと同じ ABI を話していることの証拠がこれ。**
+         * 実機と同じ port_wasm_vm.c / port_wasm_natives.c にリンクして、
+         * コミット済みの f_rust.wasm を走らせている。
+         * 作り直しは python host/fixtures/wasm/build.py（cargo が要る）。 */
+        memset(&fs, 0, sizeof fs);
+        cdk_wasm_ctx_init(&c, &host);
+
+        char  a0[] = "rs";
+        char  a1[] = "one";
+        char *argv[] = {a0, a1};
+        T_CHECK(cdk_wasm_set_args(&c, 2, argv));
+        memset(a1, 'Z', sizeof a1 - 1); /* 複製が効いていないと化ける */
+
+        T_EQ_INT(run("f_rust.wasm", &c, out, sizeof out, &ret, err, sizeof err),
+                 CDK_WASM_DONE);
+        T_EQ_STR(out,
+                 "hello argc=2 [0]=rs [1]=one size=80x26 read=abcdef "
+                 "esc1=Perm esc2=Perm gfx=NoSys sum=15");
+        T_EQ_INT(fs.nopen, 0); /* Drop と cleanup でハンドルが返っている */
+    }
+
+    T_CASE("線形メモリを 1MB より多く宣言したモジュールは断る");
+    {
+        /* ファームは d_m3MaxLinearMemoryPages=16 で打ち止めている。
+         * ここが効いていないと、PSRAM を食い潰すモジュールが通ってしまう。 */
+        cdk_wasm_ctx_init(&c, &host);
+        T_EQ_INT(run("f_bigmem.wasm", &c, out, sizeof out, &ret, err, sizeof err),
+                 CDK_WASM_BADMODULE);
+        T_EQ_STR(out, "");
+        T_CHECK(strstr(err, "linear memory") != NULL);
+    }
+
     T_CASE("ABI の関数は全部リンク表に載っている");
     {
         /* 表から落とすと、そのゲストは「未知のインポート」で動かなくなる。

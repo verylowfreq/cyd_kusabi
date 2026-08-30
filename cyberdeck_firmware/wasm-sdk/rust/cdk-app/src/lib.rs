@@ -85,6 +85,6 @@ pub use error::{Error, Result};
 /// よく使うものをまとめて持ってくる。
 pub mod prelude {
     pub use crate::error::{Error, Result};
-    pub use crate::{args, con, fs, gpio, i2c, net, time, uart};
+    pub use crate::{args, con, fs, gfx, gpio, i2c, net, time, uart};
     pub use crate::{main, print, println};
 }

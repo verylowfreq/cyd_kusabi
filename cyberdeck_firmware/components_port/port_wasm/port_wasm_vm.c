@@ -53,10 +53,16 @@ cdk_wasm_result_t cdk_wasm_vm_run(cdk_wasm_ctx_t *ctx,
 
     r = m3_LoadModule(rt, mod);
     if (r) {
-        /* load に失敗した時点ではまだ runtime が引き取っていない。自分で返す。
-         * 成功したあとは runtime のものになるので、二重に free しない。 */
-        m3_FreeModule(mod);
-        mod = NULL;
+        /* **失敗しても runtime がモジュールを引き取る。** 上流の m3_LoadModule
+         * は _catch の中でモジュールをランタイムの一覧の末尾に繋ぐ
+         * （途中まで進んだ初期化が他のモジュールの表に関数を書いている
+         * かもしれず、それを宙ぶらりんにしないため）。
+         *
+         * ここで m3_FreeModule を呼ぶと、あとの m3_FreeRuntime と合わせて
+         * **二重解放になって落ちる。** 線形メモリを大きく宣言した
+         * モジュールで実際に踏んだ（f_bigmem）。ゲストが持ち込む
+         * データでファームが落ちるので、いちばん踏ませたくない類。
+         * 何もせず m3_FreeRuntime に任せる。 */
         set_err(err, err_cap, r);
         goto done;
     }

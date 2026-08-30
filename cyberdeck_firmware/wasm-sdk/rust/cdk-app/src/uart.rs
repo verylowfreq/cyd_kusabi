@@ -9,6 +9,7 @@ use crate::error::{Result, check, check_ok, len_i32};
 use crate::sys;
 
 /// 開いている UART。`Drop` で閉じる。
+#[derive(Debug)]
 pub struct Uart(i32);
 
 impl Uart {
