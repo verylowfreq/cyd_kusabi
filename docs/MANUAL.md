@@ -413,6 +413,93 @@ python tools/cdk.py push wasm-apps/build/hello.wasm apps/hello.wasm
 
 置き場所を省くと `apps/` の下に同じ名前で入る。
 
+### Rust で書く
+
+C の代わりに Rust でも書ける。**できることは同じ**（同じ API を使う）。
+違うのは書き味と、落ちたときに何が分かるか。
+
+```
+rustup target add wasm32-unknown-unknown
+```
+
+これだけ。ほかに入れるものは無い。
+
+```rust
+#![no_std]
+extern crate alloc;
+
+use cdk_app::prelude::*;
+
+cdk_app::main!(run);
+
+fn run() -> Result<()> {
+    println!("やあ");
+
+    let mut f = fs::File::append("log.txt")?;
+    f.write_str("動いた\n")?;
+    Ok(())
+}
+```
+
+`wasm-sdk/rust/apps/<名前>/` に置いて:
+
+```
+python tools/wasmrs.py --all
+python tools/cdk.py push wasm-apps/build/rs_hello.wasm apps/rs_hello.wasm
+```
+
+実機では `wasm run apps/rs_hello.wasm`。C 版と同じ名前のサンプルが
+`rs_` 付きで並ぶので、`wasm ls` で見比べられる。
+
+#### 何が嬉しいか
+
+**間違えたときに、どこで間違えたかが画面に出る。**
+
+```
+panic: index out of bounds: the len is 3 but the index is 7 (apps\boom\src\lib.rs:21)
+```
+
+C 版だと `落ちました: out of bounds memory access` としか出ないので、
+アプリのどこが悪いのかは自分で探すことになる。
+
+ほかに、失敗を `?` で流せること、`format!` で文字列を組めること
+（C 版の SDK には `snprintf` が無い）。`wasm-sdk/rust/apps/du/` が
+その辺りを一通り使った見本になっている。
+
+#### Rust だけが踏む落とし穴
+
+**確保したメモリは返ってこない。** `Vec` や `String` を捨てても解放されず、
+使えるのは全部で 1MB。つまり **確保を繰り返すループはいつか必ず落ちる。**
+実際に測ったところ、70 バイトの文字列を作るループは約 15,000 回で尽きた。
+
+```rust
+// 落ちる: 毎回 String を作る
+loop {
+    let s = alloc::format!("{i} 番目");
+    con::write(s.as_bytes())?;
+}
+
+// 落ちない: println! は文字列を作らずに直接書く
+loop {
+    println!("{i} 番目");
+}
+```
+
+同じことを C で書くと文字列を作らないので、**この違いは Rust にだけ出る。**
+長く回すアプリでは、確保をループの外に出すか、固定長の配列を使う。
+
+#### そのほか
+
+- **Ctrl-C で止めたとき、`Drop` は走らない。** ファイルなどはファーム側が
+  閉じるので放っておいてよいが、「閉じる前にログを書く」ような後始末は
+  当てにしないこと。
+- **`println!` は改行の面倒を見る。** `con::write` に生のバイト列を渡す
+  ときだけ `\r\n` を自分で付ける。
+- 出来上がりは C 版より少し大きい（hello が 1.5KB → 7.5KB）。上限は
+  256KB なので、実用上は気にしなくてよい。
+
+詳しくは `wasm-sdk/rust/README.md`。
+
 ### できないこと・気をつけること
 
 - **触れるのは microSD の中だけ。** `..` で外へ出ようとすると断られる。
@@ -541,6 +628,8 @@ python tools/cdk.py push a.wasm apps/a.wasm microSD へファイルを書く
 ```
 python tools/wasmcc.py wasm-apps/hello.c    .c → .wasm（clang だけで足りる）
 python tools/wasmcc.py --all
+python tools/wasmrs.py --all                Rust のアプリ（→ 10 章）
+python tools/wasminfo.py out.wasm           .wasm がファームに渡せる形か見る
 python tools/cdk.py push wasm-apps/build/hello.wasm apps/hello.wasm
 ```
 

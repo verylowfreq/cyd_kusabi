@@ -15,11 +15,14 @@ use cdk_app::prelude::*;
 
 cdk_app::main!(run);
 
+const KB: u32 = 1024;
+const MB: u32 = 1024 * 1024;
+
 fn human(bytes: u32) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{}.{}M", bytes / (1024 * 1024), (bytes / (1024 * 104)) % 10)
-    } else if bytes >= 1024 {
-        format!("{}.{}K", bytes / 1024, (bytes / 102) % 10)
+    if bytes >= MB {
+        format!("{}.{}M", bytes / MB, (bytes / (MB / 10)) % 10)
+    } else if bytes >= KB {
+        format!("{}.{}K", bytes / KB, (bytes / (KB / 10)) % 10)
     } else {
         format!("{bytes}B")
     }

@@ -18,9 +18,10 @@ ESP32-S3 サイバーデックのファームウェア。設計は [DESIGN.md](D
   公開鍵認証 / SSH 再接続
 - M8: **WebAssembly ユーザーアプリ**。`wasm run` で `.wasm` を走らせる。
   WASI でも POSIX 互換でもない独自 ABI（コンソール / ファイル / GPIO / ADC /
-  I2C / UART / TCP・UDP）。焼き直さずに機能を足せる
+  I2C / UART / TCP・UDP）。焼き直さずに機能を足せる。
+  SDK は **C と Rust の両方**（`wasm-sdk/` と `wasm-sdk/rust/`）
 
-残件と「やらないこと」は DESIGN.md §13 / §15.14 を参照。
+残件と「やらないこと」は DESIGN.md §13 / §15.15 を参照。
 
 ---
 
@@ -123,7 +124,11 @@ components_port/   ESP-IDF 依存の薄いポート層
   libssh2/           ベンダリングした libssh2 1.11.1
 main/              起動とタスク構成だけ
 host/              ホスト側 CMake / ctest / 基準レンダラ / VT フィクスチャ
-tools/             PC 側スクリプト（cdk.py / mkfont.py / skk_build.py）
+wasm-sdk/          ユーザーアプリの SDK（C）
+  rust/              同じ ABI の Rust クレート cdk-app + サンプル
+wasm-apps/         サンプルアプリ（C）
+tools/             PC 側スクリプト（cdk.py / mkfont.py / skk_build.py /
+                   wasmcc.py / wasmrs.py / wasminfo.py）
 ```
 
 ## SKK 辞書
