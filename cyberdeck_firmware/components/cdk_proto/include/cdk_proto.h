@@ -52,6 +52,22 @@ typedef enum {
      * シェルや SSH に届くので、画面をホストと突き合わせる用途には使えない。 */
     CDK_MSG_VT        = 0x12,
 
+    /* host -> dev : microSD へファイルを書く。
+     * SD を抜き差しせずにユーザーアプリ (.wasm) を更新するための口で、
+     * これが無いと自律ループが回らない（実機に置く手段が人手しかない）。
+     *
+     *   FILE_BEGIN  payload = u32le 全体の長さ + パス (UTF-8, NUL なし)
+     *   FILE_DATA   payload = 中身をそのまま（何回でも）
+     *   FILE_END    payload = u32le 中身全体の CRC32
+     *   FILE_OK     dev -> host : u32le 実際に書いたバイト数
+     *
+     * フレームごとの CRC は transport の壊れを見るもので、**フレームが
+     * まるごと落ちたことは見つけられない。** 全体の CRC を最後に突き合わせる。 */
+    CDK_MSG_FILE_BEGIN = 0x30,
+    CDK_MSG_FILE_DATA  = 0x31,
+    CDK_MSG_FILE_END   = 0x32,
+    CDK_MSG_FILE_OK    = 0x33,
+
     CDK_MSG_SHOT_REQ  = 0x20, /* host -> dev : payload なし */
     CDK_MSG_SHOT_INFO = 0x21, /* dev -> host : cdk_wire_shot_info_t */
     CDK_MSG_SHOT_DATA = 0x22, /* dev -> host : 先頭 u32le = バイトオフセット、以降ピクセル */

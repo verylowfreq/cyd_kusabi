@@ -32,6 +32,11 @@ typedef struct {
     /* エディタを開いてセッションを切り替える。 */
     bool (*edit_open)(const char *path);
 
+    /* ユーザーアプリ (.wasm) を走らせてセッションを切り替える。
+     * argv は中で複製される（cdk_shell_split の argv はコマンドが
+     * return した時点で無効になるため）。 */
+    bool (*wasm_open)(const char *path, int argc, char **argv);
+
     void (*reboot)(void);
 } app_ctx_t;
 
@@ -53,6 +58,12 @@ const char *cdk_ssh_key_path(void);
 
 /* NVS の ssh.recon を反映する。`set ssh.recon off` から呼ぶ。 */
 void cdk_apply_reconnect_setting(void);
+/* main/cdk_pushfile.c。ホストから microSD へファイルを書く（cdk.py push）。
+ * 書ける場所は cdk_wasm と同じサンドボックス（/sdcard の下だけ）。 */
+void cdk_push_begin(const uint8_t *payload, uint32_t len);
+void cdk_push_data(const uint8_t *payload, uint32_t len);
+void cdk_push_end(const uint8_t *payload, uint32_t len);
+
 bool cdk_edit_file_load(cdk_edit_t *e, const char *path);
 bool cdk_edit_file_save(cdk_edit_t *e);
 
@@ -68,3 +79,6 @@ extern const size_t          APP_SKK_COMMANDS_COUNT;
 
 extern const cdk_shell_cmd_t APP_EDIT_COMMANDS[];
 extern const size_t          APP_EDIT_COMMANDS_COUNT;
+
+extern const cdk_shell_cmd_t APP_WASM_COMMANDS[];
+extern const size_t          APP_WASM_COMMANDS_COUNT;

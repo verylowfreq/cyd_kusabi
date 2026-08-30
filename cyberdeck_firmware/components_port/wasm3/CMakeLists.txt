@@ -28,7 +28,7 @@ idf_component_register(SRCS ${WASM3_SRCS}
 # インタプリタはネイティブスタックを再帰で使う。上限を FreeRTOS タスクの
 # スタック (CDK_WASM_TASK_STACK) より小さく取り、暴走した再帰がスタックを
 # 壊す前に wasm3 側でトラップさせる。既定の 8MB のままだと素通りする。
-target_compile_definitions(${COMPONENT_LIB} PRIVATE d_m3MaxNativeStack=20480)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE d_m3MaxNativeStack=49152)
 
 # 上流のコードは自分たちの警告設定でビルドされている。
 # こちらの -Werror を持ち込まない。

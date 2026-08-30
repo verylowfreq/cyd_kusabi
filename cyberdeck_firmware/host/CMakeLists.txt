@@ -180,7 +180,7 @@ file(GLOB WASM3_SRCS CONFIGURE_DEPENDS ${WASM3_DIR}/*.c ${WASM3_DIR}/extensions/
 add_library(wasm3 STATIC ${WASM3_SRCS})
 target_include_directories(wasm3 PUBLIC ${WASM3_DIR})
 # 実機と同じ上限。ここが違うと「ホストでは通るのに実機で落ちる」が出る。
-target_compile_definitions(wasm3 PUBLIC d_m3MaxNativeStack=20480)
+target_compile_definitions(wasm3 PUBLIC d_m3MaxNativeStack=49152)
 if(MSVC)
     target_compile_options(wasm3 PRIVATE /W0)
 else()

@@ -30,6 +30,7 @@
 #include "cdk_retry.h"
 #include "cdk_status.h"
 #include "cdk_storage.h"
+#include "cdk_wasm_run.h"
 #include "cdk_usbhid.h"
 #include "esp_timer.h"
 #include "cdk_term.h"
@@ -124,7 +125,8 @@ static char      *s_edit_arena;
 typedef enum {
     SESSION_SHELL = 0,
     SESSION_SSH,
-    SESSION_EDIT
+    SESSION_EDIT,
+    SESSION_WASM
 } session_t;
 
 static session_t s_session = SESSION_SHELL;
@@ -177,6 +179,23 @@ static void enter_edit(void)
     s_edit.mode_label = cdk_skk_mode_label(&s_skk);
     cdk_edit_draw(&s_edit);
     s_dirty = true;
+}
+
+/* ユーザーアプリ。**edit と同じく、切り替えて即 return する。**
+ * アプリ自体は専用タスクで走っていて、ここは画面とキーの持ち主を
+ * 移すだけ。走っている間シェルを止めるので、ロックを持たない
+ * port_periph / port_cfg をシェルとアプリが同時に叩くことがない。 */
+static void enter_wasm(void)
+{
+    s_session = SESSION_WASM;
+    drop_preedit();
+    cdk_shell_end(&s_shell);
+    s_dirty = true;
+}
+
+static void leave_wasm(void)
+{
+    enter_shell();
 }
 
 static void leave_edit(void)
@@ -257,6 +276,23 @@ static void route_key(void *user, const cdk_key_t *k)
         return;
     }
 
+    if (s_session == SESSION_WASM) {
+        /* Ctrl-C は止める合図。アプリには渡さない。
+         * 渡してしまうと、読まないアプリを止める手段が無くなる。 */
+        if ((k->mods & CDK_MOD_CTRL_BIT) && (k->codepoint == 'c' || k->codepoint == 'C')) {
+            cdk_wasm_run_stop();
+            term_printf("\r\n\033[33mwasm  : 止めています...\033[0m\r\n");
+            s_dirty = true;
+            return;
+        }
+        /* それ以外は**端末が出すのと同じバイト列**にしてアプリへ。
+         * ゲストからは普通の端末に見える（新しいキーの表現を作らない）。 */
+        uint8_t out[16];
+        const size_t n = cdk_keys_encode(k, s_term.app_cursor_keys, out, sizeof(out));
+        if (n > 0) cdk_wasm_run_feed(out, n);
+        return;
+    }
+
     if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
         uint8_t out[16];
         const size_t n = cdk_keys_encode(k, s_term.app_cursor_keys, out, sizeof(out));
@@ -275,6 +311,20 @@ static void route_bytes(const uint8_t *data, size_t len)
 {
     if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
         (void)cdk_ssh_write(data, len);
+        return;
+    }
+    /* ユーザーアプリも SSH と同じ扱い。こちらでエスケープを解かない。
+     * ただし Ctrl-C だけは横取りする（route_key と揃える）。 */
+    if (s_session == SESSION_WASM) {
+        for (size_t i = 0; i < len; i++) {
+            if (data[i] == 0x03) {
+                cdk_wasm_run_stop();
+                term_printf("\r\n\033[33mwasm  : 止めています...\033[0m\r\n");
+                s_dirty = true;
+                return;
+            }
+        }
+        cdk_wasm_run_feed(data, len);
         return;
     }
     /* エディタはキーイベントで受ける。SSH と違い、こちらでエスケープを
@@ -382,6 +432,17 @@ static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t 
             const cdk_key_t k = {w.keycode, w.mods, w.codepoint};
             route_key(NULL, &k);
         }
+        break;
+
+    /* ホストから microSD へファイルを書く。中身は main/cdk_pushfile.c。 */
+    case CDK_MSG_FILE_BEGIN:
+        cdk_push_begin(payload, len);
+        break;
+    case CDK_MSG_FILE_DATA:
+        cdk_push_data(payload, len);
+        break;
+    case CDK_MSG_FILE_END:
+        cdk_push_end(payload, len);
         break;
 
     default:
@@ -800,6 +861,23 @@ static bool app_edit_open(const char *path)
     return true;
 }
 
+static bool app_wasm_open(const char *path, int argc, char **argv)
+{
+    char why[128] = {0};
+    /* **argv はここで写される。** cdk_shell_split の argv は execute() の
+     * スタックを指していて、コマンドが return した時点で無効になる。 */
+    const esp_err_t err = cdk_wasm_run_start(path, argc, argv,
+                                             s_term.cols, s_term.rows,
+                                             why, sizeof(why));
+    if (err != ESP_OK) {
+        term_printf("\033[31mwasm  : %s\033[0m\r\n", why[0] ? why : esp_err_to_name(err));
+        s_dirty = true;
+        return false;
+    }
+    enter_wasm();
+    return true;
+}
+
 static void app_reboot(void)
 {
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -918,6 +996,7 @@ void app_main(void)
         .skk_get_mode = app_skk_get_mode,
         .skk_dict = app_skk_dict,
         .edit_open = app_edit_open,
+        .wasm_open = app_wasm_open,
         .reboot = app_reboot,
     };
     /* コマンド表を繋いで渡す。help は登録された表をそのまま見る。
@@ -927,10 +1006,16 @@ void app_main(void)
     _Static_assert(ALL_CMDS_MAX >= 32, "コマンド表が小さすぎる");
     static cdk_shell_cmd_t   all_cmds[ALL_CMDS_MAX];
     const cdk_shell_cmd_t   *tables[] = {APP_COMMANDS, APP_FS_COMMANDS,
-                                         APP_SKK_COMMANDS, APP_EDIT_COMMANDS};
+                                         APP_SKK_COMMANDS, APP_EDIT_COMMANDS,
+                                         APP_WASM_COMMANDS};
     const size_t             counts[] = {APP_COMMANDS_COUNT, APP_FS_COMMANDS_COUNT,
                                          APP_SKK_COMMANDS_COUNT,
-                                         APP_EDIT_COMMANDS_COUNT};
+                                         APP_EDIT_COMMANDS_COUNT,
+                                         APP_WASM_COMMANDS_COUNT};
+    /* 表を足すときは 2 か所ある。片方だけ足すと counts の外を読む。 */
+    _Static_assert(sizeof(tables) / sizeof(tables[0])
+                       == sizeof(counts) / sizeof(counts[0]),
+                   "tables と counts の数が合っていない");
     size_t ncmds = 0;
     for (size_t t = 0; t < sizeof(tables) / sizeof(tables[0]); t++) {
         for (size_t i = 0; i < counts[t]; i++) {
@@ -970,6 +1055,12 @@ void app_main(void)
         cdk_edit_set_size(&s_edit, cols, rows);
     } else {
         ESP_LOGE(TAG, "エディタの領域を確保できません");
+    }
+
+    /* ユーザーアプリ (.wasm) を置く領域。ここも起動時に 1 回だけ。
+     * 取れなくても起動は続ける（`wasm run` だけが使えなくなる）。 */
+    if (cdk_wasm_run_init() != ESP_OK) {
+        term_printf("\033[33mwasm  : 置き場を確保できません\033[0m\r\n");
     }
 
     cdk_skk_init(&s_skk, skk_commit, NULL);
@@ -1045,6 +1136,28 @@ void app_main(void)
                     }
                     break;
                 }
+            }
+        }
+
+        /* ユーザーアプリ。**別タスクで走っているので、ここは汲むだけ。**
+         * 端末とキャンバスを触るのはメインループだけ、という約束を守る。 */
+        if (s_session == SESSION_WASM) {
+            char wbuf[256];
+            char report[160];
+            bool done = false;
+            for (int i = 0; i < 8; i++) { /* 1 周で汲みすぎない */
+                const int n = cdk_wasm_run_poll(wbuf, (int)sizeof(wbuf), &done,
+                                                report, sizeof(report));
+                if (n > 0) {
+                    cdk_term_feed(&s_term, (const uint8_t *)wbuf, (size_t)n);
+                    s_dirty = true;
+                    continue;
+                }
+                break;
+            }
+            if (done) {
+                term_printf("%s", report);
+                leave_wasm();
             }
         }
 

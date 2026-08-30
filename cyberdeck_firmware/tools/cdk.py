@@ -113,6 +113,10 @@ MSG_LOG = 0x04
 MSG_KEY = 0x10
 MSG_TEXT = 0x11
 MSG_VT = 0x12
+MSG_FILE_BEGIN = 0x30
+MSG_FILE_DATA = 0x31
+MSG_FILE_END = 0x32
+MSG_FILE_OK = 0x33
 MSG_SHOT_REQ = 0x20
 MSG_SHOT_INFO = 0x21
 MSG_SHOT_DATA = 0x22
@@ -616,6 +620,49 @@ def cmd_type(args) -> int:
     return 0
 
 
+def cmd_push(args) -> int:
+    """ローカルのファイルを microSD へ書く。
+
+    SD を抜いて PC に挿さずにユーザーアプリを更新できることが、
+    エージェントが自分で書いて自分で試すループの前提になる。
+
+    フレームごとの CRC は transport の壊れしか見ない。フレームがまるごと
+    落ちたことは見つけられないので、全体の CRC を END で突き合わせる。
+    """
+    data = Path(args.local).read_bytes()
+    remote = args.remote
+    if remote is None:
+        remote = "apps/" + Path(args.local).name
+
+    ctrl = Ctrl(args.ctrl)
+    try:
+        ctrl.drain(0.1)
+        head = struct.pack("<I", len(data)) + remote.encode("utf-8")
+        ctrl.send(MSG_FILE_BEGIN, head)
+
+        for i in range(0, len(data), MAX_PAYLOAD):
+            ctrl.send(MSG_FILE_DATA, data[i : i + MAX_PAYLOAD])
+
+        ctrl.send(MSG_FILE_END, struct.pack("<I", zlib.crc32(data) & 0xFFFFFFFF))
+
+        got = ctrl.recv(timeout=args.timeout)
+        if got is None:
+            print(f"[cdk] 返事がありません（{args.timeout} 秒）", file=sys.stderr)
+            return 1
+        t, p = got
+        if t == MSG_FILE_OK:
+            (wrote,) = struct.unpack("<I", p[:4])
+            print(f"[cdk] {remote} に {wrote} バイト書きました")
+            return 0
+        if t == MSG_ERROR:
+            print(f"[cdk] {p.decode('utf-8', 'replace')}", file=sys.stderr)
+            return 1
+        print(f"[cdk] 予期しない返事 {MSG_NAMES.get(t, hex(t))}", file=sys.stderr)
+        return 1
+    finally:
+        ctrl.close()
+
+
 def cmd_vt(args) -> int:
     """バイト列を端末へ直接流して画面を確定的な状態にする。
 
@@ -919,6 +966,13 @@ def main() -> int:
     p = sub.add_parser("flash", help="ビルド済みバイナリを書き込む")
     p.add_argument("--baud", type=int, default=921600)
     p.set_defaults(func=cmd_flash)
+
+    p = sub.add_parser("push", help="ローカルのファイルを microSD へ書く")
+    p.add_argument("local")
+    p.add_argument("remote", nargs="?", default=None,
+                   help="実機側のパス（既定 apps/<ファイル名>）。/sdcard の外は書けない")
+    p.add_argument("--timeout", type=float, default=20.0)
+    p.set_defaults(func=cmd_push)
 
     p = sub.add_parser("vt", help="端末を初期化してバイト列を流す（画面検証用）")
     p.add_argument("file")
