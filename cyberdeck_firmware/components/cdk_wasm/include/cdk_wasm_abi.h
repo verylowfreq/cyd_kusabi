@@ -50,8 +50,11 @@ enum { CDK_SEEK_SET = 0, CDK_SEEK_CUR = 1, CDK_SEEK_END = 2 };
 /* gpio_mode */
 enum { CDK_GPIO_IN = 0, CDK_GPIO_IN_PU = 1, CDK_GPIO_IN_PD = 2, CDK_GPIO_OUT = 3 };
 
-/* sock_open */
-enum { CDK_SOCK_TCP = 0, CDK_SOCK_UDP = 1 };
+/* sock_open。**TLS はホスト (ESP-IDF の esp-tls) 側で終端する。**
+ * 開いたあとの sock_connect / send / recv / close は TCP と同じ。
+ * _TLS_INSECURE は証明書を検証しない。**TLS は同時 2 本まで**
+ * （mbedtls を PSRAM に置いて入る数。port_sock.c のコメントに実測を書いた）。 */
+enum { CDK_SOCK_TCP = 0, CDK_SOCK_UDP = 1, CDK_SOCK_TLS = 2, CDK_SOCK_TLS_INSECURE = 3 };
 
 /* 上限。ゲストから見える資源はすべて有限で、起動時に決まる。 */
 enum {
@@ -118,7 +121,7 @@ typedef struct cdk_wasm_host {
     int (*uart_close)(void *user, int h);
 
     int (*net_up)(void *user);
-    int (*sock_open)(void *user, int type);                   /* 戻りは実 fd */
+    int (*sock_open)(void *user, int type);                   /* 戻りはホスト側のハンドル */
     int (*sock_connect)(void *user, int sd, const char *host, int port);
     int (*sock_send)(void *user, int sd, const void *p, int n);
     int (*sock_recv)(void *user, int sd, void *p, int n);

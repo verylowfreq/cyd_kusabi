@@ -1,7 +1,10 @@
 //! 素の TCP / UDP ソケット。
 //!
 //! SSH とは別物。あちらはファームが 1 本だけ握る専用の口で、こちらは
-//! アプリが自由に開ける（同時に 4 本まで）。**TLS は無い。**
+//! アプリが自由に開ける（同時に 4 本まで）。
+//!
+//! **TLS はファーム側 (ESP-IDF) が終端する。** `TcpStream::connect_tls` で
+//! 開けば、あとは素の TCP と同じ `write` / `read` が使える。TLS は同時 2 本まで。
 //!
 //! どの呼び出しも有限時間で戻る。`connect` は 10 秒で時間切れ、
 //! `read` は 200ms 待って何も無ければ 0 を返す。
@@ -25,10 +28,30 @@ impl TcpStream {
     ///
     /// 待っている間に Ctrl-C が来ると、そこで止まって戻ってこない。
     pub fn connect(host: &str, port: u16) -> Result<TcpStream> {
+        Self::connect_with(host, port, sys::CDK_SOCK_TCP)
+    }
+
+    /// TLS で繋ぐ。証明書はファームが持つバンドルで検証する。
+    ///
+    /// 中身の TLS はファーム側 (ESP-IDF) が終端するので、繋がったあとは
+    /// 素の TCP と同じ `write` / `read` が使える。**同時 2 本まで。**
+    pub fn connect_tls(host: &str, port: u16) -> Result<TcpStream> {
+        Self::connect_with(host, port, sys::CDK_SOCK_TLS)
+    }
+
+    /// 証明書を検証せずに TLS で繋ぐ。
+    ///
+    /// **自己署名の相手を試すとき以外に使わないこと。** 相手が誰であっても
+    /// 繋がってしまう。
+    pub fn connect_tls_insecure(host: &str, port: u16) -> Result<TcpStream> {
+        Self::connect_with(host, port, sys::CDK_SOCK_TLS_INSECURE)
+    }
+
+    fn connect_with(host: &str, port: u16, ty: i32) -> Result<TcpStream> {
         if !is_up() {
             return Err(Error::Io);
         }
-        let sd = check(unsafe { sys::sock_open(sys::CDK_SOCK_TCP) })?;
+        let sd = check(unsafe { sys::sock_open(ty) })?;
         let s = TcpStream(sd); // ここから先で失敗しても Drop が閉じる
 
         let hn = len_i32(host.len())?;

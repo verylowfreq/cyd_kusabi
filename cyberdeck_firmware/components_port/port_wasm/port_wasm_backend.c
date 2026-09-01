@@ -314,9 +314,22 @@ static int h_sock_open(void *u, int type)
 {
     (void)u;
     if (!cdk_wifi_is_connected()) return CDK_E_IO;
-    const int sd = cdk_sock_open(type == CDK_SOCK_UDP ? CDK_SOCK_TYPE_UDP
-                                                      : CDK_SOCK_TYPE_TCP);
-    return (sd < 0) ? CDK_E_IO : sd;
+
+    int t;
+    switch (type) {
+    case CDK_SOCK_UDP:           t = CDK_SOCK_TYPE_UDP; break;
+    case CDK_SOCK_TLS:           t = CDK_SOCK_TYPE_TLS; break;
+    case CDK_SOCK_TLS_INSECURE:  t = CDK_SOCK_TYPE_TLS_INSECURE; break;
+    default:                     t = CDK_SOCK_TYPE_TCP; break;
+    }
+
+    const int sd = cdk_sock_open(t);
+    if (sd >= 0) return sd;
+    /* TLS は本数を使い切ると開けない。ソケットが尽きたのと同じ意味なので
+     * CDK_E_NOMEM で返す。それ以外の失敗と区別できないが、ゲストから見て
+     * どちらも「いま開けない」で扱いは変わらない。 */
+    return (t == CDK_SOCK_TYPE_TLS || t == CDK_SOCK_TYPE_TLS_INSECURE) ? CDK_E_NOMEM
+                                                                       : CDK_E_IO;
 }
 
 static int h_sock_connect(void *u, int sd, const char *host, int port)

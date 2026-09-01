@@ -57,3 +57,30 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 # ファイル名の API は UTF-8。端末も cdk_term も UTF-8 なので変換点を作らない。
 CONFIG_FATFS_API_ENCODING_UTF_8=y
+
+# --- TLS（DESIGN.md §15.7） ---
+# ユーザーアプリの CDK_SOCK_TLS_INSECURE のために要る。
+# esp-tls は CA を一切指定しない cfg を渡されたとき、既定では
+# 「検証を飛ばす」のではなく setup ごと失敗する（esp_tls_mbedtls.c）。
+# この 2 つを入れると、その場合の既定が MBEDTLS_SSL_VERIFY_NONE になる。
+#
+# **CDK_SOCK_TLS（既定の型）は常に crt_bundle_attach を渡すので、
+# この既定には落ちない。** SSH は libssh2 が mbedtls を直接使う経路で、
+# esp-tls を通らないので影響を受けない（実機で確認した）。
+CONFIG_ESP_TLS_INSECURE=y
+CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+
+# --- mbedtls の確保先 ---
+# **PSRAM に回す。** 既定 (INTERNAL) のままだと、TLS を 2 本開いた時点で
+# 内部 DRAM が枯れて
+#   E esp-aes: Failed to allocate memory
+# が出る。しかも壊れるのは 2 本目だけではなく、**繋がっている 1 本目の
+# 送受信まで巻き添えになる。** 4 本試したときは再起動した
+# （rst:0xc、バックトレースは CORRUPTED）。
+#
+# esp-aes の DMA 記述子は MALLOC_CAP_DMA なので必ず内部 DRAM から取る
+# （esp_aes_dma_core.c）。mbedtls の 16KB/4KB バッファを PSRAM へ追い出して
+# 内部を空けてやると、その小さな確保が通るようになる。
+#
+# SSH も同じ mbedtls を使う。変えたら SSH のログインまで確認すること。
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y

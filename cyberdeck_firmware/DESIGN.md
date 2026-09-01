@@ -1862,7 +1862,7 @@ spiram 7,561,620 / 最大 7,471,104）。wasm3 は `m3_FreeRuntime` で全部返
 | gpio | `gpio_mode` `gpio_set` `gpio_get` `adc_read` |
 | i2c | `i2c_open` `i2c_write` `i2c_read` `i2c_wrrd` `i2c_close` |
 | uart | `uart_open` `uart_write` `uart_read` `uart_close` |
-| net | `net_up` `sock_open` `sock_connect` `sock_send` `sock_recv` `sock_close` |
+| net | `net_up` `sock_open` `sock_connect` `sock_send` `sock_recv` `sock_close` — TLS も同じ 6 本で扱う（下記） |
 | gfx | `gfx_size` `gfx_clear` `gfx_fill_rect` `gfx_blit` `gfx_text` `gfx_present` — **予約。`CDK_E_NOSYS` を返す** |
 
 エラーは負の戻り値（`CDK_E_INVAL` -1 / `PERM` -2 / `NOENT` -3 / `IO` -4 /
@@ -1870,6 +1870,104 @@ spiram 7,561,620 / 最大 7,471,104）。wasm3 は `m3_FreeRuntime` で全部返
 
 **キー入力は既存の `cdk_keys_encode` を通したバイト列**として `con_read` に
 流す。ゲストからは普通の端末に見える。新しいキーの表現を作らない。
+
+#### TLS (2026-09-01)
+
+**TLS は自前で持たず ESP-IDF (esp-tls + 証明書バンドル) に任せる。**
+wasm 側に TLS を積む道は、1MB のリニアメモリにも 256KB のモジュール枠にも
+入らない。ホストには mbedtls が既に居る（SSH が使っている）。
+
+**インポートは 1 本も増やしていない。** `sock_open` の型を足しただけ:
+
+| 型 | 値 | 意味 |
+|---|---|---|
+| `CDK_SOCK_TCP` | 0 | 素の TCP |
+| `CDK_SOCK_UDP` | 1 | 素の UDP |
+| `CDK_SOCK_TLS` | 2 | TLS。証明書バンドルで検証する |
+| `CDK_SOCK_TLS_INSECURE` | 3 | TLS。**検証しない** |
+
+開いたあとの `sock_connect` / `sock_send` / `sock_recv` / `sock_close` は
+素の TCP とまったく同じ約束で動く（`sock_recv` は 200ms 待って何も無ければ
+0、相手が閉じたら `CDK_E_IO`）。`sock_connect` がホスト名を持っているので、
+SNI と証明書の照合にそれをそのまま使える。
+
+名前が増えないので `abi_names_match` の `MIN_NAMES` も既存の `.wasm` も
+触らずに済む。**ABI を増やさずに機能を足せたのは、ハンドルがスロット番号で
+あって fd ではなかったおかげ**（§15.8）。ホストが返す「fd に見える整数」を
+`cdk_wasm` は素通しするだけなので、TLS の実体は `port_sock.c` に閉じた。
+
+**同時 2 本まで。ここは実機で決めた。** mbedtls のセッションは
+in 16KB + out 4KB を持つ。既定の `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC` の
+ままだとこれが内部 DRAM から取られ、この基板は空きが 75KB あっても連続では
+31,744 バイトしか取れない（§15.6）ので、2 本目で破綻した:
+
+```
+E esp-aes: Failed to allocate memory
+E esp-tls-mbedtls: mbedtls_ssl_handshake returned -0x0001
+E esp-tls-mbedtls: write error :-0x0001
+```
+
+**壊れるのは 2 本目だけではなかった。** 内部 DRAM が枯れると、既に繋がって
+いる 1 本目の read / write も esp-aes の確保に失敗して落ちる。4 本試したときは
+`rst:0xc` で再起動した（バックトレースは CORRUPTED）。「新しい接続が開けない」
+なら呼び出し側で対処できるが、「動いている接続が巻き添えで壊れる」は対処の
+しようがない。
+
+効いたのは **`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`**（`sdkconfig.defaults`）。
+esp-aes の DMA 記述子は `MALLOC_CAP_DMA` なので**必ず内部 DRAM から取る**
+（`esp_aes_dma_core.c`）。小さな確保なのに失敗していたのは、mbedtls の
+16KB/4KB が内部を埋めていたから。mbedtls 本体を PSRAM へ追い出して内部を
+空けると、2 本ともハンドシェイクから送受信まで通る。
+
+数字: ハンドシェイクは 1 本で 1,917ms、2 本並行でも 1,880〜1,911ms、
+4 本並行でも 1,871〜1,920ms。**ほぼ変わらない**＝この時間は網の往復と
+証明書の検証が支配していて、mbedtls のバッファがどの RAM にあるかは効かない。
+内部 DRAM は TLS を使っても最大ブロック 31,744 のまま動かない。
+
+上限を増やすときは**必ず実機で、SSH を挟んで繰り返し**試すこと。
+一度は内部 DRAM のままでも 2 本通ってしまった。**たまたま通る数を上限に
+してはいけない。** 4 本も一度は通ったが、2 本ほど繰り返し確かめていないので
+上限は 2 にしてある。
+
+`sdkconfig.defaults` に足したのは上の `MBEDTLS_EXTERNAL_MEM_ALLOC` と、
+もう 1 組ある。`CDK_SOCK_TLS_INSECURE` のために
+`CONFIG_ESP_TLS_INSECURE=y` と `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` を
+入れた。**プロジェクト全体の既定を変えるフラグ**なので理由を書いておく:
+esp-tls は CA を一切指定しない cfg を渡されると、検証を飛ばすのではなく
+setup ごと失敗する（`esp_tls_mbedtls.c`）。`skip_common_name` はホスト名の
+照合と SNI を止めるだけで連鎖の検証は止めない。効くのは「CA を何も指定
+しなかったとき」だけで、`CDK_SOCK_TLS` は常に `crt_bundle_attach` を渡すため
+この既定には落ちない。SSH は libssh2 が mbedtls を直接叩く経路で esp-tls を
+通らない（実機で SSH ログインまで確認した）。
+
+##### 実機で見たこと
+
+| 見たこと | 証拠 |
+|---|---|
+| `httpsget.wasm example.com /` が 829 バイト取れる（素の TCP と同じ量） | `m8_https.png` |
+| `self-signed.badssl.com` は `-4` で断る | `m8_https_selfsigned.png` |
+| 同じ相手に `-k` を付けると 769 バイト取れる | `m8_https_insecure.png` |
+| **`sock_recv` が 3001ms で 15 回**＝ちょうど 200ms 刻み | `m8_https_recvrate.png` |
+| ハンドシェイク中の Ctrl-C が効く | `m8_https_abort_hs.png` |
+| 受信中の Ctrl-C が効く（`sock_close` せずに落ちても後始末される） | `m8_https_abort_recv.png` |
+| **TLS 2 本が同時に通る**（3 本目は `CDK_E_NOMEM`）。SSH を挟んでも通る | `m8_https_psram2.png` / `m8_https_psram_afterssh.png` |
+| mbedtls を内部 DRAM に置くと 2 本目で `esp-aes: Failed to allocate memory` | 本文のログ |
+| 内部 DRAM のまま 4 本開くと `rst:0xc` で再起動する | 本文のログ |
+| トラップで落ちた後もハンドルが戻る（`sock_close` を呼ばずに落ちても） | `m8_https_trap.png` |
+| SSH が今までどおり入れる（mbedtls を PSRAM に移した後も） | `m8_https_psram_ssh.png` |
+| 内部 DRAM の最大ブロックが 31,744 のまま動かない | `m8_https_heap.png` |
+
+フラッシュは 1,527,728 → 1,663,984 バイト（+136,256 = 約 133KB）。証明書バンドルと
+esp-tls が実際にリンクされるようになったぶん。`factory` 4MB の 60% が空き。
+
+##### やっていないこと
+
+- `http_get()` のような高水準の API（esp_http_client 相当）。今回は
+  「ソケットが TLS になる」だけ。ヘッダの解釈はアプリの仕事のまま。
+- クライアント証明書、TLS のサーバ側、DTLS。
+- TLS セッション再開（`CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS` は無効のまま）。
+- **ホスト側の自動テスト。** `port_sock.c` はホストビルドに入らないので、
+  TLS の確認は実機だけ。ホストで見ているのは型の引数検査の枝だけ。
 
 #### 描画 (`gfx_*`) を予約だけにした理由
 

@@ -451,7 +451,9 @@ int cdk_wasm_net_up(cdk_wasm_ctx_t *c)
 
 int cdk_wasm_sock_open(cdk_wasm_ctx_t *c, int type)
 {
-    if (type != CDK_SOCK_TCP && type != CDK_SOCK_UDP) return CDK_E_INVAL;
+    if (type != CDK_SOCK_TCP && type != CDK_SOCK_UDP && type != CDK_SOCK_TLS &&
+        type != CDK_SOCK_TLS_INSECURE)
+        return CDK_E_INVAL;
     if (!c->host->sock_open) return CDK_E_NOSYS;
 
     int slot = -1;

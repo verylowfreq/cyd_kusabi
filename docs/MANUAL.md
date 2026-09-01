@@ -388,6 +388,7 @@ wasm info                        ABI と上限を見る
 | `i2cscan.wasm` | I2C を探す。`wasm run apps/i2cscan.wasm <SDA> <SCL>` |
 | `uartecho.wasm` | 端末と外部 UART をつなぐ |
 | `httpget.wasm` | `wasm run apps/httpget.wasm example.com /` |
+| `httpsget.wasm` | 同じことを **https** で。`wasm run apps/httpsget.wasm example.com /` |
 
 ### 書く
 
@@ -519,6 +520,28 @@ loop {
 
 詳しくは `wasm-sdk/rust/README.md`。
 
+### https で繋ぐ
+
+**TLS はファームの側で面倒を見る。** アプリからは、ソケットを開くときの
+種類を変えるだけでよい。
+
+```c
+int sd = sock_open(CDK_SOCK_TLS);   /* CDK_SOCK_TCP の代わりに */
+sock_connect(sd, host, hlen, 443);
+```
+
+繋がったあとの `sock_send` / `sock_recv` / `sock_close` は素の TCP と
+まったく同じに書ける。見本は `httpsget.wasm`。
+
+相手の証明書は本体が持っている証明書の束で確かめる。**期限切れや
+自己署名の相手には繋がらない**（`繋がりません (-4)` が出る）。
+
+- **TLS で開けるのは同時に 2 本まで。** 3 本目は断られる。素の TCP/UDP は
+  今までどおり 4 本。
+- 試しに自己署名の相手へ繋ぎたいときだけ `CDK_SOCK_TLS_INSECURE` がある。
+  **相手が誰でも繋がってしまうので、普段は使わないこと。**
+  `httpsget.wasm` では `-k` を付けるとこちらになる。
+
 ### できないこと・気をつけること
 
 - **触れるのは microSD の中だけ。** `..` で外へ出ようとすると断られる。
@@ -531,6 +554,7 @@ loop {
   `sys_delay` や `con_write` を挟んでいれば止まる。止まらなくなったら
   電源を入れ直すしかない。
 - **アプリの大きさは 256KB まで。** 開けるファイルは同時に 4 つまで。
+- **TLS は同時に 2 本まで。** 1 本あたり 20KB ほど使う。
 - **外部 UART は 1 本だけ。** 残りはコンソールと PC との通信で埋まっている。
 - **液晶・microSD・USB・PC との通信に使っているピンは触れない。**
   名前を出して断るので、何に使われているかはその場で分かる。
@@ -546,6 +570,8 @@ loop {
 | `読めません: ...` | `.wasm` が壊れているか、`cdk_main` を出していない |
 | `落ちました: out of bounds ...` | アプリが配列の外を触った（本体は無事） |
 | `G12 は LCD SCLK に使われています` | そのピンは基板が使っている |
+| https で `繋がりません (-4)` | 相手の証明書が確かめられない（期限切れ・自己署名）。時計が大きくずれていても出る |
+| https で `sock_open に失敗 (-5)` | TLS を 3 本開こうとしている。1 本閉じてから |
 
 ---
 

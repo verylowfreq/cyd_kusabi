@@ -1,5 +1,5 @@
 /* 素の TCP で HTTP GET する。使い方: wasm run apps/httpget.wasm <host> [path]
- * TLS は無いので http のみ。ソケット API の確認用。 */
+ * これは素の TCP の見本なので http のみ。https は httpsget.c を見ること。 */
 #include "cdk_app.h"
 
 CDK_MAIN int cdk_main(int argc)

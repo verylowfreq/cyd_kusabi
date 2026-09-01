@@ -1,6 +1,6 @@
 //! 素の TCP で HTTP GET する。`wasm run apps/rs_httpget.wasm <host> [path]`
 //!
-//! TLS は無いので http のみ。C 版は SDK に snprintf が無く、リクエスト行を
+//! 素の TCP の見本なので http のみ。TLS は TcpStream::connect_tls を使う。C 版は SDK に snprintf が無く、リクエスト行を
 //! 1 バイトずつ組み立てていた。こちらは `format!` で済む。
 #![no_std]
 

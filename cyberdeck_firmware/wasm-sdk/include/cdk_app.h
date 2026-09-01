@@ -50,6 +50,13 @@ typedef long long      cdk_i64;
 
 #define CDK_SOCK_TCP 0
 #define CDK_SOCK_UDP 1
+/* TLS。**中身はファーム側 (ESP-IDF) が終端する。** 開いたあとは
+ * sock_connect / sock_send / sock_recv / sock_close をそのまま使う。
+ * 証明書はファームが持つバンドルで検証する。
+ * _TLS_INSECURE は検証しないので、自己署名の相手を試すとき以外に使わない。
+ * **TLS は同時 2 本まで。** 3 本目の sock_open は CDK_E_NOMEM。 */
+#define CDK_SOCK_TLS          2
+#define CDK_SOCK_TLS_INSECURE 3
 
 /* ---- sys ------------------------------------------------------------- */
 

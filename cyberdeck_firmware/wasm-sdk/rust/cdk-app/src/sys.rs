@@ -118,6 +118,10 @@ pub const CDK_GPIO_OUT: i32 = 3;
 
 pub const CDK_SOCK_TCP: i32 = 0;
 pub const CDK_SOCK_UDP: i32 = 1;
+/// TLS。中身はファーム側 (ESP-IDF) が終端する。同時 2 本まで。
+pub const CDK_SOCK_TLS: i32 = 2;
+/// 証明書を検証しない TLS。自己署名の相手を試すとき以外に使わない。
+pub const CDK_SOCK_TLS_INSECURE: i32 = 3;
 
 /// ファームが受け取る `.wasm` の上限（`CDK_WASM_MODULE_MAX`）。
 pub const MODULE_MAX: usize = 256 * 1024;

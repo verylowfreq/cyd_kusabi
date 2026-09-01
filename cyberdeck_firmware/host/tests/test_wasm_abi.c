@@ -308,6 +308,9 @@ static void test_handles(void)
         /* make_host は net_* も i2c_* も埋めていない */
         T_EQ_INT(cdk_wasm_net_up(&c), CDK_E_NOSYS);
         T_EQ_INT(cdk_wasm_sock_open(&c, CDK_SOCK_TCP), CDK_E_NOSYS);
+        /* TLS も同じ口を通る。型が増えても NOSYS の枝は変わらない。 */
+        T_EQ_INT(cdk_wasm_sock_open(&c, CDK_SOCK_TLS), CDK_E_NOSYS);
+        T_EQ_INT(cdk_wasm_sock_open(&c, CDK_SOCK_TLS_INSECURE), CDK_E_NOSYS);
         T_EQ_INT(cdk_wasm_i2c_open(&c, 1, 2, 100000), CDK_E_NOSYS);
         T_EQ_INT(cdk_wasm_adc_read(&c, 0), CDK_E_NOSYS);
     }
@@ -321,6 +324,9 @@ static void test_handles(void)
         T_EQ_INT(cdk_wasm_gpio_mode(&c, 35, CDK_GPIO_OUT), CDK_E_PERM);
         T_EQ_INT(cdk_wasm_gpio_mode(&c, 1, CDK_GPIO_OUT), CDK_E_OK);
         T_EQ_INT(cdk_wasm_sock_open(&c, 42), CDK_E_INVAL);
+        /* TLS を足したぶん、境界のすぐ外も見ておく。 */
+        T_EQ_INT(cdk_wasm_sock_open(&c, 4), CDK_E_INVAL);
+        T_EQ_INT(cdk_wasm_sock_open(&c, -1), CDK_E_INVAL);
         T_EQ_INT(cdk_wasm_sys_delay(&c, -1), CDK_E_INVAL);
     }
 
