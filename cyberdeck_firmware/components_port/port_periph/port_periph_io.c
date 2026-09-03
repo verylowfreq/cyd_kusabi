@@ -29,6 +29,8 @@ static const char *TAG = "cdk_io";
 
 #define I2C_DEVS_MAX   8
 #define I2C_TIMEOUT_MS 100
+/* 相手が SCL を引っぱって待たせられる上限。dev_for() を見よ。 */
+#define I2C_SCL_STRETCH_US 25000
 
 /* scan と同じ I2C_NUM_1 を使う。scan は一時的に作って壊すだけなので、
  * 開けている間に scan を呼ばれるとぶつかる。開いていたら scan を断る。 */
@@ -39,6 +41,8 @@ static struct {
     i2c_master_dev_handle_t    dev;
 } s_devs[I2C_DEVS_MAX];
 static int s_ndevs;
+/* 次に潰す枠。表が埋まったら古い順に捨てる（dev_for を見よ）。 */
+static int s_next_evict;
 
 /* open で言われた速度。**デバイスを足すときに使う。**
  * ESP-IDF の新しい I2C ドライバは、クロックをバスではなくデバイスごとに
@@ -85,12 +89,24 @@ esp_err_t cdk_i2c_open(int sda, int scl, uint32_t freq_hz)
         return err;
     }
     s_ndevs = 0;
+    s_next_evict = 0;
     s_freq_hz = freq_hz;
     ESP_LOGI(TAG, "I2C 開始 SDA=G%d SCL=G%d %u Hz", sda, scl, (unsigned)freq_hz);
     return ESP_OK;
 }
 
-/* アドレスごとのハンドル。毎回 add/remove すると遅いのでキャッシュする。 */
+/* アドレスごとのハンドル。毎回 add/remove すると遅いのでキャッシュする。
+ *
+ * **表が埋まったら古い順に捨てる。** ここで ESP_ERR_NO_MEM を返していたので、
+ * アプリからバスを走査する（0x08-0x77 を順に叩く）と 9 個目のアドレス
+ * 以降が「居ない」ことになっていた。0x08-0x0F で枠を使い切るので、
+ * `i2cscan.wasm` は 0x10 より上のセンサを絶対に見つけられない。
+ * シェルの `i2c scan` は i2c_master_probe を使って表を通らないため、
+ * 同じピンで片方だけ見つかる、という分かりにくい形で出る。
+ *
+ * 捨てるのは**ハンドルだけ**。アドレスはまた叩けば作り直せるので、
+ * 走査のような一度きりの用途では遅くなるだけで済む。センサを何度も
+ * 読む用途（同じ数個のアドレスを回す）では表に載ったまま当たる。 */
 static esp_err_t dev_for(int addr, i2c_master_dev_handle_t *out)
 {
     if (s_bus == NULL) return ESP_ERR_INVALID_STATE;
@@ -99,22 +115,63 @@ static esp_err_t dev_for(int addr, i2c_master_dev_handle_t *out)
     for (int i = 0; i < s_ndevs; i++) {
         if (s_devs[i].addr == (uint8_t)addr) { *out = s_devs[i].dev; return ESP_OK; }
     }
-    if (s_ndevs >= I2C_DEVS_MAX) return ESP_ERR_NO_MEM;
+
+    int slot = s_ndevs;
+    if (s_ndevs >= I2C_DEVS_MAX) {
+        slot = s_next_evict;
+        const esp_err_t rm = i2c_master_bus_rm_device(s_devs[slot].dev);
+        if (rm != ESP_OK) {
+            /* 枠を空けられなかった。相手が返事をしないのとは違う話なので、
+             * 「資源が足りない」で返す（NACK に混ぜると原因を追えない）。 */
+            ESP_LOGW(TAG, "0x%02X のハンドルを捨てられません: %s",
+                     s_devs[slot].addr, esp_err_to_name(rm));
+            return ESP_ERR_NO_MEM;
+        }
+        s_devs[slot].dev  = NULL;
+        s_devs[slot].addr = 0;
+        s_next_evict = (s_next_evict + 1) % I2C_DEVS_MAX;
+    }
 
     const i2c_device_config_t dcfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = (uint16_t)addr,
         .scl_speed_hz = s_freq_hz, /* open で言われた速度。既定値で足さない */
+        /* SCL を引っぱって待たせる（クロックストレッチ）センサに合わせる。
+         * ドライバの既定は 2ms しかない。SHT30 は高精度の測定で 15ms
+         * 引っぱる（0x2C06 のように「測ってから読む」命令はこれに当たる）
+         * ので、既定のままだと読みだけが時間切れで落ちる。 */
+        .scl_wait_us = I2C_SCL_STRETCH_US,
     };
     i2c_master_dev_handle_t dev = NULL;
     const esp_err_t err = i2c_master_bus_add_device(s_bus, &dcfg, &dev);
     if (err != ESP_OK) return err;
 
-    s_devs[s_ndevs].addr = (uint8_t)addr;
-    s_devs[s_ndevs].dev = dev;
-    s_ndevs++;
+    s_devs[slot].addr = (uint8_t)addr;
+    s_devs[slot].dev  = dev;
+    if (slot == s_ndevs) s_ndevs++;
     *out = dev;
     return ESP_OK;
+}
+
+/* 開いているバスで 1 アドレスだけ叩く。
+ *
+ * **デバイスハンドルを作らない。** i2c_master_probe はバスハンドルを取り、
+ * 「アドレス + 書き」だけを出して ACK を見る。dev_for を通らないので
+ * 8 枠のキャッシュも消費しない。
+ *
+ * **読みで走査してはいけない。** 実機で分かったこと: 各アドレスに
+ * 1 バイト読みを投げて走査すると、M5Stack Unit ENV III の SHT30 が
+ * 予期しない読みで止まり、来ない続きを待って SCL を握り続ける。
+ * ユニットの電源を抜くまで戻らず、バスに繋がった他のデバイスも
+ * 全部道連れになる。`i2c_new_master_bus` のバスクリア（9 クロック）も
+ * 効かない。相手が握っている線は叩いても上がらない。
+ * 0 バイト書きは i2c_master_transmit が受け付けない（write_size > 0）
+ * ので、安全な走査は IDF ではこの関数しかない。 */
+esp_err_t cdk_i2c_probe(int addr)
+{
+    if (s_bus == NULL) return ESP_ERR_INVALID_STATE;
+    if (addr < 0x08 || addr > 0x77) return ESP_ERR_INVALID_ARG;
+    return i2c_master_probe(s_bus, (uint16_t)addr, I2C_TIMEOUT_MS);
 }
 
 esp_err_t cdk_i2c_write(int addr, const void *p, size_t n)
@@ -152,6 +209,7 @@ esp_err_t cdk_i2c_close(void)
         (void)i2c_master_bus_rm_device(s_devs[i].dev);
     }
     s_ndevs = 0;
+    s_next_evict = 0;
     const esp_err_t err = i2c_del_master_bus(s_bus);
     s_bus = NULL;
     s_freq_hz = 0;

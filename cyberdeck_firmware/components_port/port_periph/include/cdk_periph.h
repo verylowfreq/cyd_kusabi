@@ -53,6 +53,13 @@ esp_err_t cdk_i2c_scan(int sda, int scl, uint32_t freq_hz,
  */
 esp_err_t cdk_i2c_open(int sda, int scl, uint32_t freq_hz);
 bool      cdk_i2c_is_open(void);
+/* 開いているバスで 1 アドレスだけ叩く。**走査はこれで書く。**
+ * 「アドレス + 書き 0 バイト」しか出さないので、相手は 1 ビットも
+ * 吐き出さない。読みで走査すると、予期しない読みを投げられた相手が
+ * 来ない続きを待って SCL を握り続け、電源を切るまで戻らなくなる
+ * （実機の SHT30 で再現した。port_periph_io.c を見よ）。
+ * 居なければ ESP_ERR_NOT_FOUND。 */
+esp_err_t cdk_i2c_probe(int addr);
 esp_err_t cdk_i2c_write(int addr, const void *p, size_t n);
 esp_err_t cdk_i2c_read(int addr, void *p, size_t n);
 /* 書いてから読む（リピートスタート）。レジスタ読みはこれ。 */

@@ -239,22 +239,52 @@ static int h_i2c_open(void *u, int sda, int scl, int hz)
     return map_err(cdk_i2c_open(sda, scl, (uint32_t)hz));
 }
 
+/* 読み書きの失敗は map_err に通さない。
+ *
+ * ESP-IDF v5.5 の I2C マスタは、同期転送が **DONE にならなかった**ときに
+ * まとめて ESP_ERR_INVALID_STATE を返す（i2c_master.c の
+ * `status != I2C_STATUS_DONE`）。相手が返事をしない (NACK) も、バスが
+ * 返事を待ったまま時間切れになった（プルアップが無い・SCL が張り付いた・
+ * ストレッチが長すぎる）も、区別せずここに来る。ESP_ERR_TIMEOUT は
+ * 返ってこないので、map_err に通すと全部 CDK_E_PERM になり、
+ * 「予約ピンで断られた」のと見分けが付かなくなる。
+ *
+ * ここでは「相手が居ない」寄りの CDK_E_NOENT にする。**どちらだったかは
+ * ログ UART で分かる。** 時間切れはドライバが ESP_LOGE で出すが、NACK は
+ * ESP_LOGD なので出ない。`i2c.master` の E 行が出ていたら配線かプルアップ、
+ * 出ていなければそのアドレスが返事をしていない。
+ *
+ * open は別で、あちらの INVALID_STATE は本当に禁止（G11/G12 の内蔵バス、
+ * または二重 open）なので map_err のまま。 */
+static int map_i2c_xfer_err(esp_err_t e)
+{
+    if (e == ESP_ERR_INVALID_STATE) return CDK_E_NOENT; /* NACK / バスの時間切れ */
+    return map_err(e);
+}
+
+/* probe は「居ない」を ESP_ERR_NOT_FOUND で返してくれるので map_err で足りる。 */
+static int h_i2c_probe(void *u, int addr)
+{
+    (void)u;
+    return map_err(cdk_i2c_probe(addr));
+}
+
 static int h_i2c_write(void *u, int addr, const void *p, int n)
 {
     (void)u;
-    return map_err(cdk_i2c_write(addr, p, (size_t)n));
+    return map_i2c_xfer_err(cdk_i2c_write(addr, p, (size_t)n));
 }
 
 static int h_i2c_read(void *u, int addr, void *p, int n)
 {
     (void)u;
-    return map_err(cdk_i2c_read(addr, p, (size_t)n));
+    return map_i2c_xfer_err(cdk_i2c_read(addr, p, (size_t)n));
 }
 
 static int h_i2c_wrrd(void *u, int addr, const void *w, int wn, void *r, int rn)
 {
     (void)u;
-    return map_err(cdk_i2c_write_read(addr, w, (size_t)wn, r, (size_t)rn));
+    return map_i2c_xfer_err(cdk_i2c_write_read(addr, w, (size_t)wn, r, (size_t)rn));
 }
 
 static int h_i2c_close(void *u)
@@ -393,6 +423,7 @@ static const cdk_wasm_host_t k_backend = {
     .adc_read  = h_adc_read,
 
     .i2c_open  = h_i2c_open,
+    .i2c_probe = h_i2c_probe,
     .i2c_write = h_i2c_write,
     .i2c_read  = h_i2c_read,
     .i2c_wrrd  = h_i2c_wrrd,

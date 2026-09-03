@@ -69,6 +69,10 @@ unsafe extern "C" {
 
     // ---- I2C ----
     pub fn i2c_open(sda: i32, scl: i32, hz: i32) -> i32;
+    /// 1 アドレスだけ叩いて居るかを見る。**走査はこれで書く。**
+    /// 居なければ `CDK_E_NOENT`。`i2c_read` で走査すると、予期しない読みを
+    /// 投げられた相手が SCL を握り続け、電源を抜くまでバスごと死ぬ。
+    pub fn i2c_probe(addr: i32) -> i32;
     pub fn i2c_write(addr: i32, p: *const u8, n: i32) -> i32;
     pub fn i2c_read(addr: i32, p: *mut u8, n: i32) -> i32;
     /// 書いてから読む（リピートスタート）。レジスタ読みはこれ。

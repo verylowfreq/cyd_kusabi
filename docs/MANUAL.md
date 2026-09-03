@@ -508,7 +508,9 @@ wasm info                        ABI と上限を見る
 | `flood.wasm` | 200 行を一息に出す（出力が落ちないかの確認） |
 | `spin.wasm` | 回り続ける（Ctrl-C の確認） |
 | `blink.wasm` | GPIO を点滅させる。`wasm run apps/blink.wasm <ピン> [回数]` |
-| `i2cscan.wasm` | I2C を探す。`wasm run apps/i2cscan.wasm <SDA> <SCL>` |
+| `i2cscan.wasm` | I2C を探す。`wasm run apps/i2cscan.wasm <SDA> <SCL>`。シェルの `i2c scan` と同じ結果になる |
+| `envunit3.wasm` | M5Stack Unit ENV III の温度・湿度を読む。`wasm run apps/envunit3.wasm [<SDA> <SCL>]`（既定は Grove の 17/18） |
+| `i2cdiag.wasm` | I2C の叩き方ごとに結果の番号を出す。**繋がらないときの切り分け用**。ENV III 前提 |
 | `uartecho.wasm` | 端末と外部 UART をつなぐ |
 | `httpget.wasm` | `wasm run apps/httpget.wasm example.com /` |
 | `httpsget.wasm` | 同じことを **https** で。`wasm run apps/httpsget.wasm example.com /` |
@@ -688,8 +690,13 @@ sock_connect(sd, host, hlen, 443);
 - **外部 UART は 1 本だけ。** 残りはコンソールと PC との通信で埋まっている。
 - **液晶・microSD・USB・PC との通信に使っているピンは触れない。**
   名前を出して断るので、何に使われているかはその場で分かる。
-- **I2C と UART は、実際のデバイスを繋いだ確認をしていない。**
+- **UART は、実際のデバイスを繋いだ確認をしていない。**
   ピンの拒否とバスを開けるところまでしか試していない。
+- **I2C は確認済み。** M5Stack Unit ENV III を Grove の I2C（G17/G18）に
+  繋いで、探す・温湿度を読む・探した後にもう一度読める、まで試した。
+  ただし**アプリからバスを探すときは `i2c_probe` を使うこと。**
+  `i2c_read` で総当たりすると、読みを待っていない相手が信号線を握って
+  止まり、**ユニットの電源を抜くまで**そのバスの全員が使えなくなる。
 
 ### 何かおかしいとき
 

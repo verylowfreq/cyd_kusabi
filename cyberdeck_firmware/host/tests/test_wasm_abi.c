@@ -335,6 +335,10 @@ static void test_handles(void)
         char buf[4];
         T_EQ_INT(cdk_wasm_i2c_read(&c, 0x40, buf, 4), CDK_E_INVAL);
         T_EQ_INT(cdk_wasm_i2c_close(&c), CDK_E_INVAL);
+        /* probe も同じ。開ける前は「引数がおかしい」で断る。
+         * ここを NOSYS にすると、走査アプリが「ファームが古い」と
+         * 誤って言い出す。 */
+        T_EQ_INT(cdk_wasm_i2c_probe(&c, 0x44), CDK_E_INVAL);
     }
 }
 

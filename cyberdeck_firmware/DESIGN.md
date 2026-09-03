@@ -1347,6 +1347,8 @@ ABOUT.md 「実装困難・不能な箇所についての指摘と代替案」�
 | 13 | **ユーザーアプリの無限ループが止められない** | `wasm run` したアプリが native を一度も呼ばずに回ると Ctrl-C が届かない | wasm3 の構造上の限界。native の入口では必ず止まるので、`sys_delay` や `con_write` を挟むアプリは止まる。止まらなければ `reboot`。マニュアルにもそう書いた（§15.5） |
 | 14 | **予約ピンの表が試作機のものしか無かった** | v1 で `gpio set 12` が画面を殺し、`gpio set 15` が制御チャネルを殺す。逆に Grove の I2C が使えない | ✅ M8 で解決。`cdk_board.h` を唯一の出どころにして表を基板ごとに分けた（§15.12） |
 | 15 | **ゲストのモジュールでファームが落ちる**（`m3_LoadModule` が失敗しても runtime がモジュールを引き取るのに、こちらでも解放していた） | 線形メモリを大きく宣言した `.wasm` を置くだけで再起動する | ✅ 解決。`m3_FreeRuntime` に任せる。fixture (`f_bigmem`) を足して ctest で見る（§15.14） |
+| 16 | **アドレスごとのデバイスハンドルを 8 個で打ち切っていた**（`dev_for` が 9 個目に `ESP_ERR_NO_MEM`） | アプリからバスを走査すると 0x08-0x0F で枠を使い切り、**0x10 より上を絶対に見つけられない**。シェルの `i2c scan` は `i2c_master_probe` を通るので同じピンで片方だけ見つかり、原因が分かりにくい | ✅ 解決。枠が埋まったら古い順に捨てる。実機で 12 アドレスを叩いて全部 -3（旧コードなら 9 個目以降は転送前に -5）を確認（§15.12） |
+| 17 | **走査を 1 バイト読みで書いていた。相手が壊れる** | 待機中の SHT30 に読みを 1 回投げると、来ない続きを待って **SCL を握り続ける**。ユニットの VDD を抜くまで戻らず、同じバスの他のデバイスも道連れ。シェルの `i2c scan` でも回復しない（相手が握っている線は誰も上げられない）。0 バイト書きは `i2c_master_transmit` が `write_size > 0` で弾くので、IDF で安全な走査は `i2c_master_probe` だけ | ✅ 解決。ABI に `i2c_probe` を足し、C と Rust の走査を両方それに載せ替えた。実機の Unit ENV III で、走査後もセンサが読めることを確認（§15.12） |
 
 ---
 
@@ -2147,7 +2149,7 @@ spiram 7,561,620 / 最大 7,471,104）。wasm3 は `m3_FreeRuntime` で全部返
 | con | `con_write` `con_read` `con_size` |
 | fs | `fs_open` `fs_read` `fs_write` `fs_seek` `fs_close` `fs_size` `fs_unlink` `fs_mkdir` `fs_opendir` `fs_readdir` `fs_closedir` |
 | gpio | `gpio_mode` `gpio_set` `gpio_get` `adc_read` |
-| i2c | `i2c_open` `i2c_write` `i2c_read` `i2c_wrrd` `i2c_close` |
+| i2c | `i2c_open` `i2c_probe` `i2c_write` `i2c_read` `i2c_wrrd` `i2c_close` — **走査は `i2c_probe` で書く。**読みで走査すると相手を止める（§12 の 17） |
 | uart | `uart_open` `uart_write` `uart_read` `uart_close` |
 | net | `net_up` `sock_open` `sock_connect` `sock_send` `sock_recv` `sock_close` — TLS も同じ 6 本で扱う（下記） |
 | gfx | `gfx_size` `gfx_clear` `gfx_fill_rect` `gfx_blit` `gfx_text` `gfx_present` — **予約。`CDK_E_NOSYS` を返す** |
@@ -2547,7 +2549,7 @@ CoreS3 でもビルドが通ることを確認済み（`port_link` の直しが
 - `std` 対応
 - C の SDK を置き換えること。**両方を対等に保つ**
 - 非同期 / スレッド（ランタイムが 1 本しか走らせない）
-- I2C と UART は C 版と同じく**実際のデバイスで未検証**
+- UART は C 版と同じく**実際のデバイスで未検証**（I2C は検証済み。§15.15）
 
 ### 15.15 やっていないこと
 
@@ -2557,5 +2559,8 @@ CoreS3 でもビルドが通ることを確認済み（`port_link` の直しが
 - ピクセル描画（`gfx_*` は ID 予約のみ）
 - ゲスト向けの動的メモリ解放（SDK はバンプ確保のみ）
 - 専用フラッシュパーティション（`partitions.csv` は触っていない）
-- **I2C と UART は実機のデバイスで未検証。** 繋ぐものが手元に無く、
-  ピンの拒否・`i2c_open`・バス走査までしか確かめていない。
+- **UART は実機のデバイスで未検証。** 繋ぐものが手元に無く、ピンの拒否と
+  `uart_open` までしか確かめていない。
+  （I2C は M5Stack Unit ENV III（SHT30 + QMP6988）を Grove の G17/G18 に
+  繋いで検証済み。走査・温湿度の読み出し・走査後にもう一度読めることまで
+  確かめた。そこで見つけた 2 つのバグは §12 の 16 と 17。）

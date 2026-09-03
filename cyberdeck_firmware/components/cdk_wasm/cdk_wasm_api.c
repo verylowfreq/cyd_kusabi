@@ -372,6 +372,16 @@ int cdk_wasm_i2c_open(cdk_wasm_ctx_t *c, int sda, int scl, int hz)
 
 static bool addr_ok(int addr) { return addr >= 0x08 && addr <= 0x77; }
 
+/* 走査はこれで書く。読みで走査すると相手を止められる（cdk_periph.h）。
+ * 居ないときは CDK_E_NOENT を返す。 */
+int cdk_wasm_i2c_probe(cdk_wasm_ctx_t *c, int addr)
+{
+    if (!c->i2c_open) return CDK_E_INVAL;
+    if (!addr_ok(addr)) return CDK_E_INVAL;
+    if (!c->host->i2c_probe) return CDK_E_NOSYS;
+    return c->host->i2c_probe(c->host->user, addr);
+}
+
 int cdk_wasm_i2c_write(cdk_wasm_ctx_t *c, int addr, const void *p, int n)
 {
     if (!c->i2c_open) return CDK_E_INVAL;

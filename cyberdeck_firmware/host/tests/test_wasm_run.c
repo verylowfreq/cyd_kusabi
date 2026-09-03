@@ -326,7 +326,7 @@ int main(void)
     {
         /* 表から落とすと、そのゲストは「未知のインポート」で動かなくなる。
          * 数を固定しておいて、足すときにここも見るようにする。 */
-        T_EQ_INT(cdk_wasm_native_count(), 45);
+        T_EQ_INT(cdk_wasm_native_count(), 46);
     }
 
     return t_report("test_wasm_run");

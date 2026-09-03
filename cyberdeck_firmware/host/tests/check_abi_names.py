@@ -33,7 +33,7 @@ RUST_SYS = os.path.join(ROOT, "wasm-sdk", "rust", "cdk-app", "src", "sys.rs")
 
 # 正規表現がソースの書き方に追随できなくなったときに気づくための下限。
 # ABI を増やすときはここも上げる（減らすことは想定していない）。
-MIN_NAMES = 45
+MIN_NAMES = 46
 
 
 def read(path):

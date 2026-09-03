@@ -295,6 +295,14 @@ static m3ApiRawFunction(n_i2c_open)
     m3ApiReturn((int32_t)cdk_wasm_i2c_open(ctx, sda, scl, hz));
 }
 
+static m3ApiRawFunction(n_i2c_probe)
+{
+    m3ApiReturnType(int32_t);
+    CDK_ENTER();
+    m3ApiGetArg(int32_t, addr);
+    m3ApiReturn((int32_t)cdk_wasm_i2c_probe(ctx, addr));
+}
+
 static m3ApiRawFunction(n_i2c_write)
 {
     m3ApiReturnType(int32_t);
@@ -501,6 +509,7 @@ static const cdk_native_t k_natives[] = {
     {"adc_read",      "i(i)",      &n_adc_read},
 
     {"i2c_open",      "i(iii)",    &n_i2c_open},
+    {"i2c_probe",     "i(i)",      &n_i2c_probe},
     {"i2c_write",     "i(i*i)",    &n_i2c_write},
     {"i2c_read",      "i(i*i)",    &n_i2c_read},
     {"i2c_wrrd",      "i(i*i*i)",  &n_i2c_wrrd},

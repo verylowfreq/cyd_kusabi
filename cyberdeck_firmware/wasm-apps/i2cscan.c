@@ -1,5 +1,13 @@
-/* I2C を叩く。使い方: wasm run apps/i2cscan.wasm <sda> <scl>
- * 見つけたアドレスに 1 バイト書いて応答を見る（scan と違いバスは開けたまま）。 */
+/* I2C のバスを走査する。使い方: wasm run apps/i2cscan.wasm <sda> <scl>
+ *
+ * `i2c_probe` で叩くので、シェルの `i2c scan` と同じ結果になる
+ * （あちらも同じ i2c_master_probe を通る）。バスは開けたままにする点だけが違う。
+ *
+ * **昔は i2c_read で走査していた。あれは相手を壊す。** 予期しない読みを
+ * 投げられた SHT30 が、来ない続きを待って SCL を握り続け、ユニットの電源を
+ * 抜くまでバスごと死んだ（実機で再現）。そのうえ 8 枠のハンドルを使い切って
+ * 0x10 より上を一切見つけられなかった。走査は必ず i2c_probe で書くこと。
+ */
 #include "cdk_app.h"
 
 static int arg_int(int idx, int fallback)
@@ -27,10 +35,7 @@ CDK_MAIN int cdk_main(int argc)
 
     int found = 0;
     for (int addr = 0x08; addr <= 0x77; addr++) {
-        unsigned char b = 0;
-        /* 0 バイト書きは通らないので 1 バイト読んでみる。
-         * 居なければエラーが返る。 */
-        if (i2c_read(addr, &b, 1) >= 0) {
+        if (i2c_probe(addr) >= 0) {
             cdk_printf("  0x%x\r\n", addr);
             found++;
         }

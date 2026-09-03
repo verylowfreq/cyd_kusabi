@@ -110,6 +110,7 @@ typedef struct cdk_wasm_host {
     int (*adc_read)(void *user, int ch);
 
     int (*i2c_open)(void *user, int sda, int scl, int hz);
+    int (*i2c_probe)(void *user, int addr);
     int (*i2c_write)(void *user, int addr, const void *p, int n);
     int (*i2c_read)(void *user, int addr, void *p, int n);
     int (*i2c_wrrd)(void *user, int addr, const void *w, int wn, void *r, int rn);

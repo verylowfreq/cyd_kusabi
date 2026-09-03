@@ -138,6 +138,7 @@ int cdk_wasm_gpio_get(cdk_wasm_ctx_t *c, int pin);
 int cdk_wasm_adc_read(cdk_wasm_ctx_t *c, int ch);
 
 int cdk_wasm_i2c_open(cdk_wasm_ctx_t *c, int sda, int scl, int hz);
+int cdk_wasm_i2c_probe(cdk_wasm_ctx_t *c, int addr);
 int cdk_wasm_i2c_write(cdk_wasm_ctx_t *c, int addr, const void *p, int n);
 int cdk_wasm_i2c_read(cdk_wasm_ctx_t *c, int addr, void *p, int n);
 int cdk_wasm_i2c_wrrd(cdk_wasm_ctx_t *c, int addr, const void *w, int wn, void *r, int rn);

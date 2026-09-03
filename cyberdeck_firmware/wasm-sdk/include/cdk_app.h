@@ -106,6 +106,12 @@ CDK_IMPORT(adc_read)  int adc_read(int ch); /* mV */
 /* ---- I2C ------------------------------------------------------------- */
 
 CDK_IMPORT(i2c_open)  int i2c_open(int sda, int scl, int hz);
+/* 1 アドレスだけ叩いて居るかを見る。**走査はこれで書く。**
+ * 居なければ CDK_E_NOENT。「アドレス + 書き 0 バイト」しか出さないので
+ * 相手は 1 ビットも吐き出さない。i2c_read で走査すると、予期しない読みを
+ * 投げられた相手が来ない続きを待って SCL を握り続け、電源を抜くまで
+ * バスごと死ぬ（実機の SHT30 で再現した）。 */
+CDK_IMPORT(i2c_probe) int i2c_probe(int addr);
 CDK_IMPORT(i2c_write) int i2c_write(int addr, const void *p, int n);
 CDK_IMPORT(i2c_read)  int i2c_read(int addr, void *p, int n);
 /* 書いてから読む。レジスタ読みはこれを使う。 */
