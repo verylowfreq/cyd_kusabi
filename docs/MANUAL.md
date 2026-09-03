@@ -210,7 +210,7 @@ SSH でつないだ先でも同じように効く（`Shift+PgUp` は相手には
 | `free` | メモリの空き |
 | `set` | 設定（→ 7 章） |
 | `wifi` | `wifi status` / `wifi connect` / `wifi off` |
-| `ssh` | SSH（→ 6 章） |
+| `ssh` | SSH（`ssh user@host` も可。→ 6 章） |
 | `hostkey` | 接続先のホスト鍵（`hostkey forget` で忘れる） |
 | `sd` | `sd mount` / `sd unmount` |
 | `ls` `cat` `rm` `mkdir` | microSD のファイル操作 |
@@ -267,6 +267,36 @@ ssh
 「WiFi 接続中です。待ってから」と出る。少し待ってもう一度打てばよい。
 
 `ssh close` で抜ける。リモートで `exit` しても戻る。
+
+### その場かぎりの接続先 — `ssh user@host`
+
+Linux と同じ書き方で、設定に無い相手へ繋げる。
+
+```
+ssh alice@192.168.1.5
+ssh alice@example.com
+```
+
+**設定は書き換わらない。** 次に `ssh` と打てば、また `ssh.host` の相手へ
+繋ぐ。覚えさせたいなら `set ssh.host` / `set ssh.user`。
+
+切れたときの繋ぎ直しは、**そのとき繋いでいた相手**へ行く（`ssh alice@box`
+のセッションが落ちても、設定の相手に入れ替わったりはしない）。
+
+#### 認証は鍵だけ
+
+`ssh user@host` は**公開鍵でだけ入る**。`set ssh.pass` で入れた
+パスワードは使わない。**そのパスワードは `ssh.host` の `ssh.user` のもの**
+なので、打ち間違えた宛先へ送ってしまわないため。
+
+なので、先に `ssh keygen` で作った公開鍵を相手の
+`~/.ssh/authorized_keys` に入れておくこと（→ このあとの節）。
+鍵だけで行くときは「（鍵のみ）」と出る。入れなかったときは
+「認証に失敗 (ssh key で確認)」と出るので、`ssh key` で公開鍵を確認して
+相手に貼り直す。
+
+設定と同じ `user@host` を打ったときだけは、`ssh` と打ったのと同じ扱いで
+パスワードも使う。
 
 ### 公開鍵でログインする（おすすめ）
 
@@ -388,6 +418,7 @@ reboot
 | いつまでも `WiFi接続中` のまま | `set wifi.ssid` と `set wifi.psk` を確かめて `wifi connect` |
 | 外で電池を減らしたくない | `wifi off`（→ 1 章）。電波ごと止まります |
 | 公開鍵で入れない | 接続先の `authorized_keys`（→ 6 章） |
+| `ssh user@host` で入れない | **鍵だけで入ります。**パスワードは使いません（→ 6 章） |
 | ホスト鍵が違うと言われる | 接続先を作り直したなら `hostkey forget` |
 | SD が見えない | `sd mount`。刺し直して `reboot` |
 | 設定を変えたのに効かない | `fontscale` と `statusbar` は再起動が要る |

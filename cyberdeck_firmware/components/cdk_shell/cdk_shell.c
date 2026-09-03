@@ -369,6 +369,28 @@ void cdk_shell_end(cdk_shell_t *sh)
     sh->active = false;
 }
 
+bool cdk_shell_split_userhost(const char *s, char *user, size_t ucap, char *host,
+                              size_t hcap)
+{
+    if (s == NULL || user == NULL || host == NULL || ucap == 0 || hcap == 0) {
+        return false;
+    }
+    const char *at = strrchr(s, '@');
+    if (at == NULL || at == s || at[1] == '\0') {
+        return false; /* `@` が無い / ユーザーが空 / ホストが空 */
+    }
+    const size_t ulen = (size_t)(at - s);
+    const size_t hlen = strlen(at + 1);
+    if (ulen + 1u > ucap || hlen + 1u > hcap) {
+        return false; /* 切り詰めない。別の相手になる */
+    }
+    memcpy(user, s, ulen);
+    user[ulen] = '\0';
+    memcpy(host, at + 1, hlen);
+    host[hlen] = '\0';
+    return true;
+}
+
 void cdk_shell_notify(cdk_shell_t *sh, const char *s)
 {
     if (!sh->active || s == NULL) {

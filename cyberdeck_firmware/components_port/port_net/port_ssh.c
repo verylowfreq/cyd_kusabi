@@ -196,6 +196,15 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
 
     rc = LIBSSH2_ERROR_AUTHENTICATION_FAILED;
 
+    /* **パスワードが無いなら叩かない。**
+     *
+     * sshd の試行回数 (MaxAuthTries) を 1 つ無駄にするし、何より失敗の
+     * 理由が嘘になる。鍵だけで入ろうとして駄目だったときに「password
+     * 認証に失敗」と出ると、パスワードの問題だと思って見当違いの
+     * ところを直しに行く（`ssh user@host` は鍵だけで行くので、
+     * この経路は普通に起きる）。 */
+    const bool have_pass = (cfg->password != NULL && cfg->password[0] != '\0');
+
     /* **公開鍵を先に試す。** パスワードより先にするのは、鍵を置いたのに
      * 黙ってパスワードで入っていた、という状態を作らないため。
      *
@@ -234,18 +243,22 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
              * 普通に起きる。パスワードへ落ちる。 */
             char *msg = NULL;
             libssh2_session_last_error(s_session, &msg, NULL, 0);
-            ESP_LOGW(TAG, "公開鍵認証に失敗 rc=%d (%s)。パスワードを試します", rc,
-                     (msg != NULL) ? msg : "?");
+            ESP_LOGW(TAG, "公開鍵認証に失敗 rc=%d (%s)。%s", rc,
+                     (msg != NULL) ? msg : "?",
+                     have_pass ? "パスワードを試します"
+                               : "パスワードは無いのでここで終わりです");
         }
     }
 
-    if (rc != 0 && methods != NULL && strstr(methods, "password") != NULL) {
+    if (rc != 0 && have_pass && methods != NULL &&
+        strstr(methods, "password") != NULL) {
         rc = libssh2_userauth_password(s_session, cfg->user, cfg->password);
         if (rc != 0) {
             ESP_LOGW(TAG, "password 認証に失敗 rc=%d", rc);
         }
     }
-    if (rc != 0 && methods != NULL && strstr(methods, "keyboard-interactive") != NULL) {
+    if (rc != 0 && have_pass && methods != NULL &&
+        strstr(methods, "keyboard-interactive") != NULL) {
         s_kbd_password = cfg->password;
         rc = libssh2_userauth_keyboard_interactive(s_session, cfg->user, kbd_callback);
         s_kbd_password = NULL;

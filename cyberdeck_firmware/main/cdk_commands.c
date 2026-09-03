@@ -258,6 +258,11 @@ static int cmd_wifi(int argc, char **argv, void *user)
 static char s_key_line[512];
 static char s_key_fp[80];
 
+/* `ssh user@host` の分解先。main.c の s_ssh_arg_* へ写されるので、
+ * ここは受け渡しの間だけ持てばよい。スタックに積まない理由は上と同じ。 */
+static char s_ssh_user_arg[48];
+static char s_ssh_host_arg[80];
+
 static int cmd_ssh(int argc, char **argv, void *user)
 {
     app_ctx_t *ctx = ctx_of(user);
@@ -320,6 +325,31 @@ static int cmd_ssh(int argc, char **argv, void *user)
         return 0;
     }
 
+    /* Linux と同じ `ssh user@host`。**NVS には書かない**（その場かぎり）。
+     * 覚えさせたいなら `set ssh.host` / `set ssh.user`。
+     *
+     * ここまで来た argv[1] は close/key/keygen ではない。**黙って
+     * 無視しない。** 引数が意味を持つようになったので、`ssh myhost` が
+     * 何も言わず NVS の相手へ繋ぐのは以前より悪い。 */
+    const char *at_user = NULL;
+    const char *at_host = NULL;
+    if (argc >= 2) {
+        if (argc > 2) {
+            cdk_shell_write(sh, "使い方: ssh [user@host|close|key|keygen]\r\n");
+            return 1;
+        }
+        if (!cdk_shell_split_userhost(argv[1], s_ssh_user_arg,
+                                      sizeof(s_ssh_user_arg), s_ssh_host_arg,
+                                      sizeof(s_ssh_host_arg))) {
+            cdk_shell_printf(sh, "\033[31m%s を user@host として読めません\033[0m\r\n",
+                             argv[1]);
+            cdk_shell_write(sh, "使い方: ssh [user@host|close|key|keygen]\r\n");
+            return 1;
+        }
+        at_user = s_ssh_user_arg;
+        at_host = s_ssh_host_arg;
+    }
+
     if (!cdk_wifi_is_connected()) {
         /* **「待て」と「自分で繋げ」を分ける。** 起動が WiFi を待たなく
          * なったので、IP が来る前に `ssh` と打つのが普通の順序になった。
@@ -335,7 +365,7 @@ static int cmd_ssh(int argc, char **argv, void *user)
         }
         return 1;
     }
-    if (!ctx->ssh_open()) {
+    if (!ctx->ssh_open(at_user, at_host)) {
         return 1;
     }
     return 0;
@@ -511,7 +541,7 @@ const cdk_shell_cmd_t APP_COMMANDS[] = {
     {"free",    "ヒープの空き",                           cmd_free},
     {"set",     "設定の表示と変更 (set <key> <value>)",   cmd_set},
     {"wifi",    "WiFi (wifi connect|off)",                cmd_wifi},
-    {"ssh",     "SSH (ssh close|key|keygen)",             cmd_ssh},
+    {"ssh",     "SSH (user@host|close|key|keygen)",       cmd_ssh},
     {"gpio",    "GPIO の mode / set / get",               cmd_gpio},
     {"adc",     "ADC1 を読む (adc read <ch>)",            cmd_adc},
     {"i2c",     "I2C を走査 (i2c scan <sda> <scl>)",      cmd_i2c},

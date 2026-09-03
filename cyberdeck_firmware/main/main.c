@@ -623,6 +623,16 @@ static char s_ssh_host[80];
 static char s_ssh_user[48];
 static char s_ssh_pass[80];
 
+/* `ssh alice@box` で渡された相手。空なら NVS の設定を使う。
+ * **NVS には書かない**（その場かぎり。人間の指示）。
+ *
+ * **切断や失敗では消さない。消すのは引数なしの `ssh` だけ。**
+ * 切れたときの繋ぎ直しはここを見るので、閉じるたびに消すと
+ * `ssh alice@box` のセッションが落ちたあと NVS の既定へ繋ぎ直して
+ * しまう。別の機械に入るので、いちばんやってはいけない間違い。 */
+static char s_ssh_arg_host[80];
+static char s_ssh_arg_user[48];
+
 /* 設定値を NVS から読む。無ければ secrets.h（ビルド時に焼いた値）で補い、
  * その場で NVS に書いて次回以降は NVS だけで動くようにする。
  *
@@ -895,23 +905,55 @@ static void app_wifi_status(void)
      * 表示の体裁をコマンド側に閉じ込めておきたいのでフックだけ残す。 */
 }
 
+/* いまの相手へ繋ぐ。相手は s_ssh_arg_* があればそちら、無ければ NVS。
+ * **繋ぎ直しもここを通る**ので、引数で入ったセッションは同じ相手へ戻る。 */
 static bool app_ssh_open(void)
 {
     load_config();
 
-    if (s_ssh_host[0] == '\0' || s_ssh_user[0] == '\0') {
+    const char *user = s_ssh_user;
+    const char *host = s_ssh_host;
+    const char *pass = s_ssh_pass;
+    bool        key_only = false;
+
+    if (s_ssh_arg_host[0] != '\0') {
+        user = s_ssh_arg_user;
+        host = s_ssh_arg_host;
+
+        /* **溜めてあるパスワードを、打たれたばかりの相手へ送らない。**
+         *
+         * `ssh.pass` は `ssh.host` の `ssh.user` のものであって、
+         * 「どこでも使う合言葉」ではない。打ち間違えた宛先や知らない
+         * 機械へ送れば、そこで平文で受け取られる。取り消せない。
+         *
+         * NVS の相手と**ユーザーもホストも一致するときだけ**使う。
+         * こうすると `ssh <NVS と同じ>` は引数なしの `ssh` と同じに
+         * 振る舞い、それ以外は鍵だけになる。この機械は SD の鍵で入るのが
+         * 本筋なので、実用上もこれで足りる（DESIGN.md §8.2）。 */
+        if (strcmp(user, s_ssh_user) != 0 || strcmp(host, s_ssh_host) != 0) {
+            /* **NULL は渡せない。** libssh2_userauth_password は
+             * strlen() に素通しするので落ちる。 */
+            pass = "";
+            key_only = true;
+        }
+    }
+
+    if (host[0] == '\0' || user[0] == '\0') {
         term_printf("\033[31mssh   : 接続先が未設定 (set ssh.host / ssh.user)\033[0m\r\n");
         return false;
     }
 
-    term_printf("ssh   : %s@%s に接続中...\r\n", s_ssh_user, s_ssh_host);
+    /* 鍵だけで行くことを言っておく。**黙って行くと、入れなかったときに
+     * 「パスワードが違う」と思われる。** 桁が狭いので短く付ける。 */
+    term_printf("ssh   : %s@%s に接続中%s...\r\n", user, host,
+                key_only ? "（鍵のみ）" : "");
 
     /* PTY のサイズは端末の実値。最終ハードの 80x26 を決め打ちしない。 */
     const cdk_ssh_config_t cfg = {
-        .host = s_ssh_host,
+        .host = host,
         .port = 22,
-        .user = s_ssh_user,
-        .password = s_ssh_pass,
+        .user = user,
+        .password = pass,
         .term = "xterm-256color",
         .cols = s_term.cols,
         .rows = s_term.rows,
@@ -922,7 +964,15 @@ static bool app_ssh_open(void)
 
     const esp_err_t err = cdk_ssh_connect(&cfg);
     if (err != ESP_OK) {
-        term_printf("\033[31mssh   : 接続失敗 %s\033[0m\r\n", esp_err_to_name(err));
+        /* 認証だけは生のコードで出さない。**`ssh user@host` は鍵だけで
+         * 行くので、鍵が相手の authorized_keys に無い、がいちばん多い。**
+         * ESP_ERR_NOT_ALLOWED と出されても次に何をすればいいか分からない。 */
+        if (err == ESP_ERR_NOT_ALLOWED) {
+            term_printf("\033[31mssh   : 認証に失敗 (ssh key で確認)\033[0m\r\n");
+        } else {
+            term_printf("\033[31mssh   : 接続失敗 %s\033[0m\r\n",
+                        esp_err_to_name(err));
+        }
         return false;
     }
     /* **スタックの余裕を実測して残す。** 公開鍵認証を足したときに
@@ -932,6 +982,23 @@ static bool app_ssh_open(void)
              (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
     enter_ssh();
     return true;
+}
+
+/* シェルからの入口。user/host が NULL なら NVS の設定へ戻す。 */
+static bool app_ssh_open_to(const char *user, const char *host)
+{
+    if (user != NULL && host != NULL) {
+        strncpy(s_ssh_arg_user, user, sizeof(s_ssh_arg_user) - 1);
+        s_ssh_arg_user[sizeof(s_ssh_arg_user) - 1] = '\0';
+        strncpy(s_ssh_arg_host, host, sizeof(s_ssh_arg_host) - 1);
+        s_ssh_arg_host[sizeof(s_ssh_arg_host) - 1] = '\0';
+    } else {
+        /* **引数なしの `ssh` だけが指定を消す。** 前に `ssh a@b` して
+         * いても引きずらない。 */
+        s_ssh_arg_user[0] = '\0';
+        s_ssh_arg_host[0] = '\0';
+    }
+    return app_ssh_open();
 }
 
 static void app_ssh_close(void)
@@ -1170,7 +1237,7 @@ void app_main(void)
         .wifi_connect = app_wifi_connect,
         .wifi_status = app_wifi_status,
         .wifi_off = app_wifi_off,
-        .ssh_open = app_ssh_open,
+        .ssh_open = app_ssh_open_to,
         .ssh_close = app_ssh_close,
         .ssh_is_open = app_ssh_is_open,
         .skk_set_mode = app_skk_set_mode,

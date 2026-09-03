@@ -366,6 +366,53 @@ int main(void)
         T_EQ_INT(cdk_shell_split(buf, argv, 4), 4);
     }
 
+    T_CASE("user@host を分ける");
+    {
+        char u[48];
+        char h[80];
+
+        T_CHECK(cdk_shell_split_userhost("alice@box", u, sizeof(u), h, sizeof(h)));
+        T_EQ_STR(u, "alice");
+        T_EQ_STR(h, "box");
+
+        T_CHECK(cdk_shell_split_userhost("a@192.168.1.9", u, sizeof(u), h, sizeof(h)));
+        T_EQ_STR(u, "a");
+        T_EQ_STR(h, "192.168.1.9");
+
+        /* **区切りは最後の `@`**（Linux の ssh と同じ）。 */
+        T_CHECK(cdk_shell_split_userhost("a@b@c", u, sizeof(u), h, sizeof(h)));
+        T_EQ_STR(u, "a@b");
+        T_EQ_STR(h, "c");
+    }
+
+    T_CASE("user@host にならないものは断る");
+    {
+        char u[48];
+        char h[80];
+        /* **半端に埋めない。** ユーザーだけ取れたと誤解されると、
+         * 知らない相手へ繋ぎに行く。 */
+        T_CHECK(!cdk_shell_split_userhost("@box", u, sizeof(u), h, sizeof(h)));
+        T_CHECK(!cdk_shell_split_userhost("alice@", u, sizeof(u), h, sizeof(h)));
+        T_CHECK(!cdk_shell_split_userhost("@", u, sizeof(u), h, sizeof(h)));
+        T_CHECK(!cdk_shell_split_userhost("", u, sizeof(u), h, sizeof(h)));
+        T_CHECK(!cdk_shell_split_userhost("nohost", u, sizeof(u), h, sizeof(h)));
+        T_CHECK(!cdk_shell_split_userhost(NULL, u, sizeof(u), h, sizeof(h)));
+    }
+
+    T_CASE("user@host の長さの境目");
+    {
+        char u[8];
+        char h[8];
+        /* ちょうど入る: 7 文字 + 終端 */
+        T_CHECK(cdk_shell_split_userhost("1234567@abc", u, sizeof(u), h, sizeof(h)));
+        T_EQ_STR(u, "1234567");
+        /* 1 文字はみ出す。**切り詰めずに断る。** */
+        T_CHECK(!cdk_shell_split_userhost("12345678@abc", u, sizeof(u), h, sizeof(h)));
+        T_CHECK(cdk_shell_split_userhost("a@1234567", u, sizeof(u), h, sizeof(h)));
+        T_EQ_STR(h, "1234567");
+        T_CHECK(!cdk_shell_split_userhost("a@12345678", u, sizeof(u), h, sizeof(h)));
+    }
+
     T_CASE("表示幅の計算");
     {
         /* 色付きプロンプトの幅を間違えるとカーソルがずれる。

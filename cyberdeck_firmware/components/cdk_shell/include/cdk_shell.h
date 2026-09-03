@@ -97,6 +97,18 @@ void cdk_shell_notify(cdk_shell_t *sh, const char *s);
  * 返り値は argc。argv は max 個まで。 */
 int cdk_shell_split(char *line, char **argv, int max);
 
+/* `user@host` を分ける。`ssh alice@example.com` を受けるため。
+ *
+ * **区切りは最後の `@`。** Linux の ssh と同じ規則。ユーザー名に `@` は
+ * 入らないが、それを言い訳に最初の `@` で切ると `a@b@c` の扱いが
+ * あちらと変わる。
+ *
+ * どちらかが空、`@` が無い、どちらかが長すぎる場合は **false を返して
+ * out には何も書かない**。半端に埋めると、呼び側が「ユーザーだけ取れた」と
+ * 誤解して知らない相手へ繋ぎに行く。 */
+bool cdk_shell_split_userhost(const char *s, char *user, size_t ucap, char *host,
+                              size_t hcap);
+
 /* 画面上で何桁ぶんになるかを数える。
  * エスケープ列は 0 桁、全角は 2 桁。色付きプロンプトの幅計算に要る。 */
 int cdk_shell_visible_width(const char *s, size_t len);

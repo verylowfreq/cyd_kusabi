@@ -21,8 +21,12 @@ typedef struct {
     /* 繋ぎ直すのをやめて電波も止める。SSH が開いていれば先に閉じる。 */
     void (*wifi_off)(void);
 
-    /* SSH を張ってセッションを切り替える。成功したら true。 */
-    bool (*ssh_open)(void);
+    /* SSH を張ってセッションを切り替える。成功したら true。
+     *
+     * user / host に NULL を渡すと NVS の設定へ繋ぐ。値を渡すとそちらへ
+     * 繋ぎ、**NVS には書かない**（その場かぎり）。切れたときの繋ぎ直しも
+     * 渡した相手へ行く。 */
+    bool (*ssh_open)(const char *user, const char *host);
     void (*ssh_close)(void);
     bool (*ssh_is_open)(void);
 
