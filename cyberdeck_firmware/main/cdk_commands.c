@@ -9,6 +9,7 @@
 #include "cdk_knownhosts.h"
 #include "cdk_net.h"
 #include "cdk_periph.h"
+#include "cdk_storage.h" /* cdk_sd_mounted — scp の前に SD を見る */
 
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -371,6 +372,99 @@ static int cmd_ssh(int argc, char **argv, void *user)
     return 0;
 }
 
+/* `scp` の分解先。`argv` はコマンドが return した時点で無効なので、
+ * 渡す間だけここに持つ（`s_ssh_user_arg` と同じ作法）。 */
+static cdk_scp_args_t s_scp;
+static char           s_scp_remote[200];
+
+/* エラーコードを 1 行にする。**文言をコマンド側に散らさない。** */
+static const char *scp_reason(cdk_scp_parse_t e)
+{
+    switch (e) {
+    case CDK_SCP_E_BOTH_LOCAL:
+        return "どちらかを user@host:パス にしてください";
+    case CDK_SCP_E_BOTH_REMOTE:
+        return "相手から相手へは送れません";
+    case CDK_SCP_E_NO_USER:
+        return "user@host:パス の形で書いてください";
+    case CDK_SCP_E_USERHOST:
+        return "user@host として読めません";
+    case CDK_SCP_E_NO_REMOTE:
+        return "取ってくるパスを書いてください";
+    case CDK_SCP_E_NO_LOCAL:
+        return "手元のパスが空です";
+    case CDK_SCP_E_TOOLONG:
+        return "パスが長すぎます";
+    default:
+        return "引数が読めません";
+    }
+}
+
+/* 手元のパスの末尾の名前。`user@host:` とだけ書かれたときに使う。 */
+static const char *basename_of(const char *p)
+{
+    const char *slash = strrchr(p, '/');
+    return (slash != NULL) ? slash + 1 : p;
+}
+
+static int cmd_scp(int argc, char **argv, void *user)
+{
+    app_ctx_t   *ctx = ctx_of(user);
+    cdk_shell_t *sh = ctx->sh;
+
+    if (argc != 3) {
+        cdk_shell_write(sh, "使い方: scp <手元> user@host:<パス>   送る\r\n");
+        cdk_shell_write(sh, "        scp user@host:<パス> <手元>   取る\r\n");
+        /* **1 本だけ。** 黙って無視するより、無いと言う。 */
+        cdk_shell_write(sh, "ファイルは 1 本だけ。-r はありません\r\n");
+        return 1;
+    }
+
+    const cdk_scp_parse_t e = cdk_shell_scp_parse(argv[1], argv[2], &s_scp);
+    if (e != CDK_SCP_OK) {
+        cdk_shell_printf(sh, "\033[31m%s\033[0m\r\n", scp_reason(e));
+        cdk_shell_write(sh, "使い方: scp <手元> user@host:<パス> / 逆も可\r\n");
+        return 1;
+    }
+
+    if (!cdk_sd_mounted()) {
+        cdk_shell_write(sh,
+                        "\033[31mSD がマウントされていません (sd mount)\033[0m\r\n");
+        return 1;
+    }
+    if (!cdk_wifi_is_connected()) {
+        /* `ssh` と同じ 2 通り分け。「待て」と「自分で繋げ」を混ぜない。 */
+        if (cdk_wifi_poll() == CDK_WIFI_CONNECTING) {
+            cdk_shell_write(sh, "\033[33mWiFi 接続中です。待ってから\033[0m\r\n");
+        } else {
+            cdk_shell_write(
+                sh, "\033[31mWiFi が繋がっていません (wifi connect)\033[0m\r\n");
+        }
+        return 1;
+    }
+    if (cdk_ssh_is_open()) {
+        /* セッションは 1 本しかない。開いたまま始めると壊し合う。 */
+        cdk_shell_write(sh,
+                        "\033[31mSSH を先に閉じてください (ssh close)\033[0m\r\n");
+        return 1;
+    }
+
+    /* `user@host:` とだけ書かれたら、手元の名前をそのまま使う。
+     * **空のまま渡してはいけない。** libssh2 は最後の `/` から名前を切るので、
+     * 空だと名前無しの要求になって相手が断る。 */
+    const char *remote = s_scp.remote;
+    if (s_scp.remote_is_empty) {
+        snprintf(s_scp_remote, sizeof(s_scp_remote), "%s",
+                 basename_of(s_scp.local));
+        remote = s_scp_remote;
+    }
+
+    return ctx->scp_start(s_scp.upload, s_scp.local, remote, s_scp.user,
+                          s_scp.host)
+               ? 0
+               : 1;
+}
+
 /* ホスト鍵の状態。TOFU で覚えた直後は指紋を確認できるようにしておく。 */
 static int cmd_hostkey(int argc, char **argv, void *user)
 {
@@ -542,6 +636,7 @@ const cdk_shell_cmd_t APP_COMMANDS[] = {
     {"set",     "設定の表示と変更 (set <key> <value>)",   cmd_set},
     {"wifi",    "WiFi (wifi connect|off)",                cmd_wifi},
     {"ssh",     "SSH (user@host|close|key|keygen)",       cmd_ssh},
+    {"scp",     "ファイル転送 (scp <手元> user@host:<パス>)", cmd_scp},
     {"gpio",    "GPIO の mode / set / get",               cmd_gpio},
     {"adc",     "ADC1 を読む (adc read <ch>)",            cmd_adc},
     {"i2c",     "I2C を走査 (i2c scan <sda> <scl>)",      cmd_i2c},

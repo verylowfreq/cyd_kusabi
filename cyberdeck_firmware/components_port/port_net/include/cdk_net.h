@@ -128,7 +128,12 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg);
  * **黙って閉じない** — シェルの下からセッションを抜くことになる。
  *
  * 戻り値: `ESP_ERR_NOT_ALLOWED` = 認証失敗、
- * `ESP_ERR_INVALID_STATE` = ホスト鍵の不一致か二重呼び出し。 */
+ * `ESP_ERR_INVALID_STATE` = **ホスト鍵の不一致**、
+ * `ESP_ERR_NOT_FINISHED` = シェルのセッションが開いている、
+ * `ESP_ERR_NOT_FOUND` = 相手に届かない。
+ *
+ * **不一致と二重呼び出しを同じ型にしないこと。** 混ぜると、繋がる相手に
+ * 対して「ホスト鍵が一致しません」と出す。実機で踏んだ。 */
 esp_err_t cdk_ssh_session_open(const cdk_ssh_login_t *login);
 
 /* PTY 付きのシェルを開き、ノンブロッキングへ切り替える。
@@ -168,6 +173,68 @@ typedef enum {
 } cdk_ssh_disconnect_t;
 
 cdk_ssh_disconnect_t cdk_ssh_disconnect_reason(void);
+
+/* ---------------- SCP ---------------- */
+
+/* 1 周で動かすバイト数。`push` の 1 フレームと同じ 4KB。
+ * SD ロックを握る時間をこの粒度で切るので、画面が止まらない。 */
+#define CDK_SCP_CHUNK 4096
+
+/* 進まなくなったら諦める (ms)。相手が黙ったままだと EAGAIN が永久に
+ * 返るので、誰かが時計を見ないと終わらない。 */
+#define CDK_SCP_STALL_MS 30000
+
+/* 受け取る側の上限。**画面を止めずに刻むとはいえ、無制限にはしない。**
+ * 数百 KB のテキストを想定した機械なので、それを超えるものは
+ * 断ったほうが親切（`cat` の 64KB 打ち切りと同じ考え）。 */
+#define CDK_SCP_MAX_BYTES (512u * 1024u)
+
+typedef enum {
+    CDK_SCP_PHASE_IDLE = 0,
+    CDK_SCP_PHASE_OPEN,   /* scp_send64 / scp_recv2 を通すまで */
+    CDK_SCP_PHASE_XFER,   /* 中身を動かしている */
+    CDK_SCP_PHASE_FINISH, /* 送信の終端手続き / 受信の rename */
+    CDK_SCP_PHASE_DONE
+} cdk_scp_phase_t;
+
+typedef struct {
+    cdk_scp_phase_t phase;
+    bool            upload;
+    uint32_t        done;
+    uint32_t        total; /* 0 なら未定 */
+} cdk_scp_status_t;
+
+/* 起動時に 1 回。転送用の領域を PSRAM から取る（DESIGN.md §14）。 */
+esp_err_t cdk_scp_init(void);
+
+/* 繋いで認証し、SCP のチャネルを開くところまでやって返る。
+ *
+ * **接続と認証はここでブロッキング**（実測約 1.9 秒。既存 `ssh` と同じ扱い）。
+ * 中身の転送はそのあと `cdk_scp_poll()` がメインループから刻む。
+ * そうすると画面もキーも `cdk_link_poll` も生きたままで、進捗が出せて
+ * Ctrl-C が届く。
+ *
+ * local は **`cdk_wasm_path_resolve()` を通した絶対パス**を渡すこと。
+ * ここでは検査しない（**規則を 2 か所に持たない**。DESIGN.md §15.8）。
+ *
+ * remote は相手のパス。**引用しないこと。** libssh2 が中で shell quote する
+ * （`quote_paths` が既定で 1）ので、こちらで括ると二重になって
+ * 引用符ごとの名前のファイルができる。
+ *
+ * why には失敗の理由を人が読める形で入れる。 */
+esp_err_t cdk_scp_start(bool upload, const char *local, const char *remote,
+                        const cdk_ssh_login_t *login, char *why, size_t why_cap);
+
+bool cdk_scp_busy(void);
+
+/* Ctrl-C。**伝えるだけで待たない。** 次の刻みで止まる。 */
+void cdk_scp_abort(void);
+
+/* いまの進み具合。走っていなければ false。 */
+bool cdk_scp_status(cdk_scp_status_t *out);
+
+/* メインループが毎周呼ぶ。終わっていたら *done を立て、report に 1 行入れる。 */
+void cdk_scp_poll(bool *done, char *report, size_t report_cap);
 
 /* ---------------- SSH の鍵 ---------------- */
 

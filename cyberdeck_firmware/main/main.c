@@ -30,6 +30,7 @@
 #include "cdk_retry.h"
 #include "cdk_status.h"
 #include "cdk_storage.h"
+#include "cdk_wasm.h"     /* cdk_wasm_path_resolve — SD の外へ出さない唯一の判定 */
 #include "cdk_wasm_run.h"
 #include "cdk_usbhid.h"
 #include "esp_timer.h"
@@ -139,7 +140,8 @@ typedef enum {
     SESSION_SHELL = 0,
     SESSION_SSH,
     SESSION_EDIT,
-    SESSION_WASM
+    SESSION_WASM,
+    SESSION_SCP
 } session_t;
 
 static session_t s_session = SESSION_SHELL;
@@ -207,6 +209,27 @@ static void enter_wasm(void)
 }
 
 static void leave_wasm(void)
+{
+    enter_shell();
+}
+
+/* ファイル転送。**wasm と同じく、切り替えて即 return する。**
+ *
+ * 転送そのものはメインループが `cdk_scp_poll()` で刻むので、画面もキーも
+ * 制御チャネルも生きたまま。**それでもシェルは止める。**
+ * 止めないと、転送中に `ssh` を叩かれて `cdk_ssh_connect()` が
+ * `cdk_ssh_close()` を呼び、scp のセッションを黙って壊す。FATFS の空き
+ * ハンドルも本体には 1 本しか無いので `edit` / `cat` とも喧嘩する。
+ * 止めておけば、その事故が「起きにくい」ではなく**起きない**。 */
+static void enter_scp(void)
+{
+    s_session = SESSION_SCP;
+    drop_preedit();
+    cdk_shell_end(&s_shell);
+    s_dirty = true;
+}
+
+static void leave_scp(void)
 {
     enter_shell();
 }
@@ -341,6 +364,19 @@ static void route_key(void *user, const cdk_key_t *k)
         return;
     }
 
+    if (s_session == SESSION_SCP) {
+        /* Ctrl-C だけ拾って、**残りは捨てる。**
+         * シェルは止めてあるので、ここで通してもプロンプトは無い。
+         * 捨てないと転送中に打った文字が終わったあとのシェルへ流れ込む。 */
+        if ((k->mods & CDK_MOD_CTRL_BIT) &&
+            (k->codepoint == 'c' || k->codepoint == 'C')) {
+            cdk_scp_abort();
+            term_printf("\r\n\033[33mscp   : 止めています...\033[0m\r\n");
+            s_dirty = true;
+        }
+        return;
+    }
+
     if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
         uint8_t out[16];
         const size_t n = cdk_keys_encode(k, s_term.app_cursor_keys, out, sizeof(out));
@@ -374,6 +410,20 @@ static void route_bytes(const uint8_t *data, size_t len)
         }
         cdk_wasm_run_feed(data, len);
         return;
+    }
+    /* 転送中も同じ扱い。**ここを忘れると `cdk.py key ctrl+c` が黙って
+     * 効かない**（あちらは制御チャネルのバイト列で来るので route_key を
+     * 通らない）。wasm が 2 か所に入れてある理由がそのまま当てはまる。 */
+    if (s_session == SESSION_SCP) {
+        for (size_t i = 0; i < len; i++) {
+            if (data[i] == 0x03) {
+                cdk_scp_abort();
+                term_printf("\r\n\033[33mscp   : 止めています...\033[0m\r\n");
+                s_dirty = true;
+                return;
+            }
+        }
+        return; /* 残りは捨てる */
     }
     /* エディタはキーイベントで受ける。SSH と違い、こちらでエスケープを
      * 解いてよい（相手が解釈するわけではないので）。 */
@@ -599,6 +649,53 @@ static void draw_status(bool force)
         col += w;
     }
     s_dirty = true;
+}
+
+/* 転送の進み具合を 1 行で出す。
+ *
+ * **行を増やさない。** `\r` で同じ行を書き直す（40 桁 12 行しかないので、
+ * 毎回改行すると本文が流れて消える）。`cdk_shell_notify` は使えない
+ * ——あれはシェルが動いているときだけ書く作りで、転送中は止めてある。
+ *
+ * 矢印は ASCII。`↑` `↓` は東雲 12px の収録範囲を当てにできないし、
+ * 幅と字形が食い違うものを出さないのが §5.3 の約束。 */
+static void scp_progress_line(void)
+{
+    cdk_scp_status_t st;
+    if (!cdk_scp_status(&st)) {
+        return;
+    }
+
+    /* 毎周書くと転送より描画が重くなる。**変わったときだけ、間隔を空けて。**
+     * `draw_status` が「変わったときだけ描く」のと同じ理屈。 */
+    static uint32_t last_ms;
+    static uint32_t last_pct = 0xFFFFFFFFu;
+    const uint32_t  pct = (st.total > 0) ? (st.done * 100u / st.total) : 0u;
+    const uint32_t  now = now_ms();
+    if (pct == last_pct && now - last_ms < 300u) {
+        return;
+    }
+    last_ms = now;
+    last_pct = pct;
+
+    const char *arrow = st.upload ? "->" : "<-";
+    if (st.phase == CDK_SCP_PHASE_OPEN) {
+        term_printf("\r\033[K\033[33mscp   : %s 開いています\033[0m", arrow);
+    } else if (st.total > 0) {
+        if (s_term.cols < 60) {
+            term_printf("\r\033[K\033[33mscp   : %s %luKB %lu%%\033[0m", arrow,
+                        (unsigned long)((st.done + 1023u) / 1024u),
+                        (unsigned long)pct);
+        } else {
+            term_printf("\r\033[K\033[33mscp   : %s %luKB / %luKB  %lu%%\033[0m",
+                        arrow, (unsigned long)((st.done + 1023u) / 1024u),
+                        (unsigned long)((st.total + 1023u) / 1024u),
+                        (unsigned long)pct);
+        }
+    } else {
+        term_printf("\r\033[K\033[33mscp   : %s %luKB\033[0m", arrow,
+                    (unsigned long)((st.done + 1023u) / 1024u));
+    }
 }
 
 static void draw_banner(void)
@@ -1021,6 +1118,51 @@ static bool app_ssh_open_to(const char *user, const char *host)
     return app_ssh_open();
 }
 
+/* `scp`。**接続と認証だけ待って、転送はメインループに渡す。**
+ *
+ * 相手が NVS と同じなら溜めたパスワードを使い、違えば鍵だけで行く。
+ * 判定は `pick_password()` 1 か所（`ssh` と共有。**規則を 2 か所に
+ * 持たない**。DESIGN.md §8.3）。
+ *
+ * **`s_ssh_arg_*` を触らない。** あれは `ssh` の繋ぎ直し先なので、
+ * `scp` の相手で上書きすると、あとで切れた SSH が別の機械へ繋ぎ直す。 */
+static bool app_scp_start(bool upload, const char *local, const char *remote,
+                          const char *user, const char *host)
+{
+    load_config();
+
+    bool        key_only = false;
+    const char *pass = pick_password(user, host, &key_only);
+
+    /* パスは **`cdk_wasm_path_resolve()`** を通す。`..` を畳んでから
+     * `/sdcard` の下かを見る唯一の実装（`cdk_fscmds.c` の `resolve()` は
+     * 畳まないので `/sdcard/../nvs` が通ってしまう）。
+     * `cdk.py push` も同じ関数を通している。**規則を 2 か所に持たない。** */
+    static char full[CDK_WASM_PATH_MAX];
+    const int   pr = cdk_wasm_path_resolve(local, (int)strlen(local), full,
+                                           (int)sizeof(full));
+    if (pr != CDK_E_OK) {
+        term_printf("\033[31mscp   : %s\033[0m\r\n",
+                    (pr == CDK_E_PERM) ? "microSD の外は触れません"
+                                       : "パスが読めません");
+        return false;
+    }
+
+    term_printf("scp   : %s %s%s...\r\n", upload ? "送ります" : "取ります",
+                remote, key_only ? "（鍵のみ）" : "");
+
+    char                  why[128] = {0};
+    const cdk_ssh_login_t login = ssh_login(user, host, pass);
+    const esp_err_t err =
+        cdk_scp_start(upload, full, remote, &login, why, sizeof(why));
+    if (err != ESP_OK) {
+        term_printf("\033[31mscp   : %s\033[0m\r\n", why);
+        return false;
+    }
+    enter_scp();
+    return true;
+}
+
 static void app_ssh_close(void)
 {
     cdk_ssh_close();
@@ -1258,6 +1400,7 @@ void app_main(void)
         .wifi_status = app_wifi_status,
         .wifi_off = app_wifi_off,
         .ssh_open = app_ssh_open_to,
+        .scp_start = app_scp_start,
         .ssh_close = app_ssh_close,
         .ssh_is_open = app_ssh_is_open,
         .skk_set_mode = app_skk_set_mode,
@@ -1329,6 +1472,13 @@ void app_main(void)
      * 取れなくても起動は続ける（`wasm run` だけが使えなくなる）。 */
     if (cdk_wasm_run_init() != ESP_OK) {
         term_printf("\033[33mwasm  : 置き場を確保できません\033[0m\r\n");
+    }
+
+    /* 転送用の領域。起動時に 1 回だけ（DESIGN.md §14）。
+     * 取れなくても scp が使えないだけなので、続ける。 */
+    if (cdk_scp_init() != ESP_OK) {
+        term_printf("\033[33mscp   : 置き場を確保できません（scp は使えません）"
+                    "\033[0m\r\n");
     }
 
     cdk_skk_init(&s_skk, skk_commit, NULL);
@@ -1443,6 +1593,20 @@ void app_main(void)
                     term_printf("\033[31mssh   : 繋ぎ直せませんでした。"
                                 "`ssh` でやり直せます\033[0m\r\n");
                 }
+            }
+        }
+
+        /* ファイル転送。**別タスクではなくここで刻む。** 1 周で動かす量は
+         * port_scp が決めているので、メインループを止めない。 */
+        if (s_session == SESSION_SCP) {
+            bool done = false;
+            char report[192];
+            cdk_scp_poll(&done, report, sizeof(report));
+            if (done) {
+                term_printf("%s", report);
+                leave_scp();
+            } else {
+                scp_progress_line();
             }
         }
 

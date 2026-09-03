@@ -30,6 +30,15 @@ typedef struct {
     void (*ssh_close)(void);
     bool (*ssh_is_open)(void);
 
+    /* SCP でファイルを 1 本やり取りする。走り出せたら true。
+     *
+     * local は SD 上のパス（**中で `cdk_wasm_path_resolve()` を通す**）。
+     * remote は相手のパスで、引用しない。相手は user@host で、
+     * **NVS には書かない**（`ssh user@host` と同じ約束）。
+     * 接続と認証の間だけ待ち、そのあとはメインループが刻む。 */
+    bool (*scp_start)(bool upload, const char *local, const char *remote,
+                      const char *user, const char *host);
+
     /* 日本語入力。状態は main.c が 1 つだけ持つ。 */
     void                  (*skk_set_mode)(cdk_skk_mode_t m);
     cdk_skk_mode_t        (*skk_get_mode)(void);

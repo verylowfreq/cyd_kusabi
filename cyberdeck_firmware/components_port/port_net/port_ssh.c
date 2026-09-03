@@ -10,6 +10,7 @@
 #include "cdk_net.h"
 
 #include "cdk_knownhosts.h"
+#include "port_ssh_priv.h"
 
 #include "esp_log.h"
 
@@ -184,12 +185,22 @@ esp_err_t cdk_ssh_session_open(const cdk_ssh_login_t *cfg)
     if (cfg == NULL || cfg->host == NULL || cfg->user == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    /* **黙って閉じない。** ここで閉じると、シェルが使っているセッションを
-     * 下から抜くことになる。入れ替えたいなら呼ぶ側が先に閉じる
-     * （`cdk_ssh_connect` はそうしている）。 */
-    if (s_open || s_session != NULL) {
-        ESP_LOGE(TAG, "すでにセッションがあります");
-        return ESP_ERR_INVALID_STATE;
+    /* **生きているシェルの下からセッションを抜かない。**
+     *
+     * 返す型を `ESP_ERR_INVALID_STATE` と分けているのが要点。あれは
+     * 「ホスト鍵が記録と違う」の意味で使っていて、混ぜると呼び側の
+     * メッセージが嘘になる（`scp` で実際に「ホスト鍵が一致しません」と
+     * 出た。**繋がる相手なのに**）。 */
+    if (s_open) {
+        ESP_LOGE(TAG, "シェルのセッションが開いています");
+        return ESP_ERR_NOT_FINISHED;
+    }
+
+    /* 前の残骸は片付けてから始める。リモートが `exit` したあとは
+     * `s_open` だけ false になってセッションとソケットが残っている
+     * （不具合 #61 と同じ経路）。 */
+    if (s_session != NULL || s_sock >= 0) {
+        cdk_ssh_session_close();
     }
 
     if (!s_lib_inited) {
@@ -368,17 +379,9 @@ esp_err_t cdk_ssh_shell_open(const char *term_name, int cols, int rows)
         return ESP_FAIL;
     }
 
-    /* ここから先はメインループが回すのでノンブロッキングにする */
-
-    /* **期限を外す。外さないと待機中の SSH が勝手に切れる。**
-     * ノンブロッキングのままセッション期限を残すと、何も来ていないときの
-     * `libssh2_channel_read` が EAGAIN ではなく `LIBSSH2_ERROR_TIMEOUT` を
-     * 返す。`cdk_ssh_read` はそれを通信断として扱うので、**10 秒黙って
-     * いただけのセッションが切れて再接続が走る。** */
-    libssh2_session_set_timeout(s_session, 0);
-    libssh2_session_set_blocking(s_session, 0);
-    const int flags = fcntl(s_sock, F_GETFL, 0);
-    fcntl(s_sock, F_SETFL, flags | O_NONBLOCK);
+    /* ここから先はメインループが回すのでノンブロッキングにする。
+     * セッションとソケットの両方を切り替える（理由は port_ssh_priv.h）。 */
+    cdk_ssh_go_nonblocking();
 
     s_open = true;
     s_disconnect = CDK_SSH_DISCONNECT_NONE;
@@ -413,6 +416,32 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
         return err;
     }
     return cdk_ssh_shell_open(cfg->term, cfg->cols, cfg->rows);
+}
+
+LIBSSH2_SESSION *cdk_ssh_session_raw(void)
+{
+    return s_session;
+}
+
+void cdk_ssh_go_nonblocking(void)
+{
+    if (s_session == NULL) {
+        return;
+    }
+    /* **期限を外す。外さないと待機中のセッションが勝手に切れる。**
+     * ノンブロッキングのままセッション期限を残すと、何も来ていないときの
+     * `libssh2_channel_read` が EAGAIN ではなく `LIBSSH2_ERROR_TIMEOUT` を
+     * 返す。`cdk_ssh_read` はそれを通信断として扱うので、**10 秒黙って
+     * いただけのセッションが切れて再接続が走る。** */
+    libssh2_session_set_timeout(s_session, 0);
+    libssh2_session_set_blocking(s_session, 0);
+    /* **ソケットも忘れずに。** セッションだけ切り替えても libssh2 の
+     * `recv()` がカーネルの中で待ってしまい、EAGAIN が返らない
+     * （scp を足したときに実機で踏んだ。画面が止まって shot が撮れない）。 */
+    if (s_sock >= 0) {
+        const int flags = fcntl(s_sock, F_GETFL, 0);
+        fcntl(s_sock, F_SETFL, flags | O_NONBLOCK);
+    }
 }
 
 bool cdk_ssh_is_open(void)
