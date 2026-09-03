@@ -223,6 +223,13 @@ static int cmd_wifi(int argc, char **argv, void *user)
         ctx->wifi_connect();
         return 0;
     }
+    /* 繋ぎ直しをやめて電波も止める。**外へ持ち出すとき用。**
+     * 一度繋がったあとの切断は期限なしで繋ぎ直し続けるので、
+     * これが無いと電池が減るのを止められない（DESIGN.md §8.1）。 */
+    if (argc >= 2 && strcmp(argv[1], "off") == 0) {
+        ctx->wifi_off();
+        return 0;
+    }
     if (argc == 1 || strcmp(argv[1], "status") == 0) {
         char ip[20];
         cdk_wifi_ip(ip, sizeof(ip));
@@ -240,7 +247,7 @@ static int cmd_wifi(int argc, char **argv, void *user)
                          cdk_wifi_last_disconnect_reason());
         return 0;
     }
-    cdk_shell_write(sh, "使い方: wifi [status|connect]\r\n");
+    cdk_shell_write(sh, "使い方: wifi [status|connect|off]\r\n");
     return 1;
 }
 
@@ -314,7 +321,18 @@ static int cmd_ssh(int argc, char **argv, void *user)
     }
 
     if (!cdk_wifi_is_connected()) {
-        cdk_shell_write(sh, "\033[31mWiFi が繋がっていません\033[0m\r\n");
+        /* **「待て」と「自分で繋げ」を分ける。** 起動が WiFi を待たなく
+         * なったので、IP が来る前に `ssh` と打つのが普通の順序になった。
+         * 繋ぎに行っている最中なら待てば帯が IP になるが、`wifi off` した
+         * あとや諦めたあとは帯が変わらない。待てと言うと永久に待つ
+         * （帯の `WiFi--` は「自分では戻らない」の意味。DESIGN.md §8.1）。 */
+        if (cdk_wifi_poll() == CDK_WIFI_CONNECTING) {
+            cdk_shell_write(sh, "\033[33mWiFi 接続中です。待ってから\033[0m\r\n");
+        } else {
+            cdk_shell_write(sh,
+                            "\033[31mWiFi が繋がっていません (wifi connect)"
+                            "\033[0m\r\n");
+        }
         return 1;
     }
     if (!ctx->ssh_open()) {
@@ -492,7 +510,7 @@ const cdk_shell_cmd_t APP_COMMANDS[] = {
     {"info",    "機器と接続の状態",                       cmd_info},
     {"free",    "ヒープの空き",                           cmd_free},
     {"set",     "設定の表示と変更 (set <key> <value>)",   cmd_set},
-    {"wifi",    "WiFi の状態と接続 (wifi connect)",       cmd_wifi},
+    {"wifi",    "WiFi (wifi connect|off)",                cmd_wifi},
     {"ssh",     "SSH (ssh close|key|keygen)",             cmd_ssh},
     {"gpio",    "GPIO の mode / set / get",               cmd_gpio},
     {"adc",     "ADC1 を読む (adc read <ch>)",            cmd_adc},

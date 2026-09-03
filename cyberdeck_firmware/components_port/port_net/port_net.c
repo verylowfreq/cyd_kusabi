@@ -253,6 +253,27 @@ cdk_wifi_state_t cdk_wifi_poll(void)
     return s_state;
 }
 
+void cdk_wifi_off(void)
+{
+    if (!s_inited) {
+        return;
+    }
+    /* **状態を先に落とす。** disconnect と stop が上げるイベントを
+     * どの枝にも入れないため。IDLE はイベント側のどちらの条件にも
+     * 当たらないので、ここで繋ぎ直しが止まる。 */
+    s_state = CDK_WIFI_IDLE;
+    s_deadline_ms = 0;
+    /* イベントを待たずにここで落とす。**直後に `wifi status` を打たれる。** */
+    s_connected = false;
+
+    (void)esp_wifi_disconnect();
+    const esp_err_t rc = esp_wifi_stop();
+    if (rc != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_stop が %s", esp_err_to_name(rc));
+    }
+    ESP_LOGI(TAG, "WiFi を止めました");
+}
+
 bool cdk_wifi_ssid_is(const char *ssid)
 {
     if (!s_connected || ssid == NULL || ssid[0] == '\0') {

@@ -45,6 +45,17 @@ esp_err_t cdk_wifi_connect_start(const char *ssid, const char *psk,
  * メインループから定期的に呼ぶこと。呼ばないと CONNECTING のまま止まる。 */
 cdk_wifi_state_t cdk_wifi_poll(void);
 
+/* 繋ぎ直すのをやめて、**電波も止める** (esp_wifi_stop)。状態は IDLE に戻る。
+ *
+ * 一度でも繋がったあとに切れた場合、この機械は期限を持たずに繋ぎ直し続ける
+ * （電波が戻れば勝手に戻ってほしいので）。だが**家で点けたまま外へ出た**ときは
+ * 相手が二度と現れないのに探し続けることになり、電池だけが減る。
+ * それを人が止めるための口。
+ *
+ * **この場かぎり。** NVS には何も書かないので、次に電源を入れれば普通に
+ * 繋ぎに行く。戻すのは `cdk_wifi_connect_start()`（シェルでは `wifi connect`）。 */
+void cdk_wifi_off(void);
+
 bool cdk_wifi_is_connected(void);
 
 /* "192.168.0.12" 形式。未接続なら "-" を入れる。 */

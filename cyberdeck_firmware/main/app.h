@@ -18,6 +18,8 @@ typedef struct {
     /* NVS の設定を読み直して WiFi へ繋ぐ。 */
     void (*wifi_connect)(void);
     void (*wifi_status)(void);
+    /* 繋ぎ直すのをやめて電波も止める。SSH が開いていれば先に閉じる。 */
+    void (*wifi_off)(void);
 
     /* SSH を張ってセッションを切り替える。成功したら true。 */
     bool (*ssh_open)(void);

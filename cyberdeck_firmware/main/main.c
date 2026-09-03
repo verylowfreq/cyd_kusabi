@@ -947,6 +947,53 @@ static bool app_ssh_is_open(void)
     return cdk_ssh_is_open();
 }
 
+/* 繋ぎ直すのをやめて電波を止める。**外へ持ち出したときのための口。**
+ *
+ * 一度でも繋がったあとに切れた場合は期限を持たずに繋ぎ直し続ける仕様
+ * （DESIGN.md §8.1）。家で点けたまま外出すると、相手が二度と現れないのに
+ * 探し続けて電池だけが減る。それを人が止める。 */
+static void app_wifi_off(void)
+{
+    /* もう止まっているなら「止めました」と言わない。**黙って効かないより
+     * 効かないと言うほうがいい**が、効いてもいないのに効いたと言うのは
+     * どちらより悪い（SSID 未設定でここに来ることもある）。 */
+    if (s_wifi_state == CDK_WIFI_IDLE && !cdk_wifi_is_connected()) {
+        term_printf("wifi  : \033[33mもう止まっています\033[0m\r\n");
+        return;
+    }
+
+    /* 後片付けを 2 つ。**どちらも今は通らない。**
+     * `wifi off` はシェルからしか打てず、シェルに居るとき SSH は閉じて
+     * いるし、キーは何であれ route_key が先に再接続を止めるため。
+     * それでも置いてあるのは、`wifi off` を「止まった状態にする」命令
+     * として単体で正しくしておきたいから。**片方でも残ると、止めたのに
+     * 電波を使い続ける**（SSH は繋ぎ直しに行き、時計は WiFi を待つ）。 */
+    if (cdk_ssh_is_open()) {
+        /* こちらから閉じる (DISCONNECT_LOCAL)。通信断として扱われると
+         * 再接続の時計が回り出す。 */
+        app_ssh_close();
+        term_printf("ssh   : 切断しました\r\n");
+    }
+    if (cdk_retry_active(&s_retry)) {
+        cdk_retry_stop(&s_retry);
+    }
+
+    cdk_wifi_off();
+    /* wifi_pump に「変わった」と思わせない。知らせはここで出している。 */
+    s_wifi_state = cdk_wifi_poll();
+    s_wifi_trying[0] = '\0';
+
+    /* 桁が狭いときは短く出す。折り返すと 12 行しかない画面を 1 行余計に
+     * 食う（失敗行と同じ分け方）。**戻し方は残す。**「止めました」だけだと
+     * 戻せるものなのかが分からない。 */
+    if (s_term.cols < 60) {
+        term_printf("wifi  : \033[33m止めました (wifi connect)\033[0m\r\n");
+    } else {
+        term_printf("wifi  : \033[33m止めました（wifi connect で戻せます）"
+                    "\033[0m\r\n");
+    }
+}
+
 static void app_skk_set_mode(cdk_skk_mode_t m)
 {
     cdk_skk_set_mode(&s_skk, m);
@@ -1122,6 +1169,7 @@ void app_main(void)
         .term = &s_term,
         .wifi_connect = app_wifi_connect,
         .wifi_status = app_wifi_status,
+        .wifi_off = app_wifi_off,
         .ssh_open = app_ssh_open,
         .ssh_close = app_ssh_close,
         .ssh_is_open = app_ssh_is_open,
