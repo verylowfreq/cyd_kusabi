@@ -905,6 +905,42 @@ static void app_wifi_status(void)
      * 表示の体裁をコマンド側に閉じ込めておきたいのでフックだけ残す。 */
 }
 
+/* 溜めたパスワードを使ってよい相手かを決める（DESIGN.md §8.3）。
+ *
+ * **`ssh` と `scp` で 1 か所。** 分けると、片方だけが知らない機械へ平文の
+ * パスワードを送るようになる。送ってしまったものは取り消せない。
+ *
+ * 呼ぶ前に load_config() すること。key_only には「鍵だけで行く」が入る
+ * （画面に出して、入れなかったときの誤診を防ぐため）。 */
+static const char *pick_password(const char *user, const char *host,
+                                 bool *key_only)
+{
+    if (strcmp(user, s_ssh_user) == 0 && strcmp(host, s_ssh_host) == 0) {
+        *key_only = false;
+        return s_ssh_pass;
+    }
+    /* **NULL は渡せない。** libssh2_userauth_password が strlen() に
+     * 素通しするので落ちる。 */
+    *key_only = true;
+    return "";
+}
+
+/* 認証に要るものを組む。鍵の場所は cdk_ssh_key_path() が唯一の出どころ。 */
+static cdk_ssh_login_t ssh_login(const char *user, const char *host,
+                                 const char *pass)
+{
+    const cdk_ssh_login_t l = {
+        .host = host,
+        .port = 22,
+        .user = user,
+        .password = pass,
+        /* 鍵が無ければ port 層が黙って飛ばす。あればパスワードより先に試す。 */
+        .key_path = cdk_ssh_key_path(),
+        .key_pass = NULL,
+    };
+    return l;
+}
+
 /* いまの相手へ繋ぐ。相手は s_ssh_arg_* があればそちら、無ければ NVS。
  * **繋ぎ直しもここを通る**ので、引数で入ったセッションは同じ相手へ戻る。 */
 static bool app_ssh_open(void)
@@ -919,24 +955,10 @@ static bool app_ssh_open(void)
     if (s_ssh_arg_host[0] != '\0') {
         user = s_ssh_arg_user;
         host = s_ssh_arg_host;
-
-        /* **溜めてあるパスワードを、打たれたばかりの相手へ送らない。**
-         *
-         * `ssh.pass` は `ssh.host` の `ssh.user` のものであって、
-         * 「どこでも使う合言葉」ではない。打ち間違えた宛先や知らない
-         * 機械へ送れば、そこで平文で受け取られる。取り消せない。
-         *
-         * NVS の相手と**ユーザーもホストも一致するときだけ**使う。
-         * こうすると `ssh <NVS と同じ>` は引数なしの `ssh` と同じに
-         * 振る舞い、それ以外は鍵だけになる。この機械は SD の鍵で入るのが
-         * 本筋なので、実用上もこれで足りる（DESIGN.md §8.2）。 */
-        if (strcmp(user, s_ssh_user) != 0 || strcmp(host, s_ssh_host) != 0) {
-            /* **NULL は渡せない。** libssh2_userauth_password は
-             * strlen() に素通しするので落ちる。 */
-            pass = "";
-            key_only = true;
-        }
     }
+    /* 溜めたパスワードを送ってよい相手かを決める。判定は pick_password に
+     * 1 つだけ置いてある（`scp` と共有する。**規則を 2 か所に持たない**）。 */
+    pass = pick_password(user, host, &key_only);
 
     if (host[0] == '\0' || user[0] == '\0') {
         term_printf("\033[31mssh   : 接続先が未設定 (set ssh.host / ssh.user)\033[0m\r\n");
@@ -950,16 +972,10 @@ static bool app_ssh_open(void)
 
     /* PTY のサイズは端末の実値。最終ハードの 80x26 を決め打ちしない。 */
     const cdk_ssh_config_t cfg = {
-        .host = host,
-        .port = 22,
-        .user = user,
-        .password = pass,
+        .login = ssh_login(user, host, pass),
         .term = "xterm-256color",
         .cols = s_term.cols,
         .rows = s_term.rows,
-        /* 鍵が無ければ port 層が黙って飛ばす。あればパスワードより先に試す。 */
-        .key_path = cdk_ssh_key_path(),
-        .key_pass = NULL,
     };
 
     const esp_err_t err = cdk_ssh_connect(&cfg);
@@ -969,6 +985,10 @@ static bool app_ssh_open(void)
          * ESP_ERR_NOT_ALLOWED と出されても次に何をすればいいか分からない。 */
         if (err == ESP_ERR_NOT_ALLOWED) {
             term_printf("\033[31mssh   : 認証に失敗 (ssh key で確認)\033[0m\r\n");
+        } else if (err == ESP_ERR_NOT_FOUND) {
+            /* 名前が引けないか、届かないか、22 番が閉じているか。
+             * どれも「宛先を確かめる」で同じなのでまとめて出す。 */
+            term_printf("\033[31mssh   : %s に届きません\033[0m\r\n", host);
         } else {
             term_printf("\033[31mssh   : 接続失敗 %s\033[0m\r\n",
                         esp_err_to_name(err));

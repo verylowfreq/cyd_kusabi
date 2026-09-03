@@ -413,6 +413,131 @@ int main(void)
         T_CHECK(!cdk_shell_split_userhost("a@12345678", u, sizeof(u), h, sizeof(h)));
     }
 
+    T_CASE("scp の引数を分解する");
+    {
+        cdk_scp_args_t g;
+
+        T_EQ_INT(cdk_shell_scp_parse("a.txt", "alice@box:/tmp/a.txt", &g),
+                 CDK_SCP_OK);
+        T_CHECK(g.upload);
+        T_EQ_STR(g.user, "alice");
+        T_EQ_STR(g.host, "box");
+        T_EQ_STR(g.remote, "/tmp/a.txt");
+        T_EQ_STR(g.local, "a.txt");
+        T_CHECK(!g.remote_is_empty);
+
+        T_EQ_INT(cdk_shell_scp_parse("alice@box:/tmp/a.txt", "a.txt", &g),
+                 CDK_SCP_OK);
+        T_CHECK(!g.upload);
+        T_EQ_STR(g.remote, "/tmp/a.txt");
+        T_EQ_STR(g.local, "a.txt");
+
+        /* **区切りは最初の `:`。** それより後ろは向こうのパスで、
+         * `:` を含んでよい（Linux も同じ）。 */
+        T_EQ_INT(cdk_shell_scp_parse("a.txt", "alice@box:/tmp/x:y", &g),
+                 CDK_SCP_OK);
+        T_EQ_STR(g.remote, "/tmp/x:y");
+
+        /* ホストは最後の `@` で切る（`ssh` と揃える）。 */
+        T_EQ_INT(cdk_shell_scp_parse("a.txt", "a@b@c:/p", &g), CDK_SCP_OK);
+        T_EQ_STR(g.user, "a@b");
+        T_EQ_STR(g.host, "c");
+
+        /* 送信でパスが空なら、手元の名前を使う合図を立てる。 */
+        T_EQ_INT(cdk_shell_scp_parse("notes.txt", "alice@box:", &g), CDK_SCP_OK);
+        T_CHECK(g.remote_is_empty);
+        T_EQ_STR(g.remote, "");
+    }
+
+    T_CASE("scp: `/` より前の `:` だけが向こう側");
+    {
+        /* **コロンを含む手元のファイルを送れなくしない。** */
+        cdk_scp_args_t g;
+        T_EQ_INT(cdk_shell_scp_parse("/sdcard/a:b", "c.txt", &g),
+                 CDK_SCP_E_BOTH_LOCAL);
+        T_EQ_INT(cdk_shell_scp_parse("./a:b", "c.txt", &g),
+                 CDK_SCP_E_BOTH_LOCAL);
+        T_EQ_INT(cdk_shell_scp_parse("a/b:c", "c.txt", &g),
+                 CDK_SCP_E_BOTH_LOCAL);
+        /* 逆に、`/` より前にあれば向こう側 */
+        T_EQ_INT(cdk_shell_scp_parse("x.txt", "alice@box:a/b:c", &g), CDK_SCP_OK);
+        T_EQ_STR(g.remote, "a/b:c");
+    }
+
+    T_CASE("scp: 断る形");
+    {
+        cdk_scp_args_t g;
+        T_EQ_INT(cdk_shell_scp_parse("a.txt", "b.txt", &g), CDK_SCP_E_BOTH_LOCAL);
+        T_EQ_INT(cdk_shell_scp_parse("a@x:/p", "b@y:/q", &g),
+                 CDK_SCP_E_BOTH_REMOTE);
+        /* **`user@` が無いものは断る。** この機械に手元のユーザー名は無い。 */
+        T_EQ_INT(cdk_shell_scp_parse("a.txt", "box:/tmp/a", &g),
+                 CDK_SCP_E_NO_USER);
+        T_EQ_INT(cdk_shell_scp_parse("box:/tmp/a", "a.txt", &g),
+                 CDK_SCP_E_NO_USER);
+        /* 受信元のパスが空だと、何を取るか決まらない */
+        T_EQ_INT(cdk_shell_scp_parse("alice@box:", "a.txt", &g),
+                 CDK_SCP_E_NO_REMOTE);
+        T_EQ_INT(cdk_shell_scp_parse("", "alice@box:/p", &g),
+                 CDK_SCP_E_NO_LOCAL);
+        T_EQ_INT(cdk_shell_scp_parse("a.txt", "@box:/p", &g),
+                 CDK_SCP_E_USERHOST);
+        T_EQ_INT(cdk_shell_scp_parse("a.txt", "alice@:/p", &g),
+                 CDK_SCP_E_USERHOST);
+    }
+
+    T_CASE("scp: 断ったときは out を触らない");
+    {
+        /* **半端に埋めない。** 宛先が取れたと誤解されると、別の相手へ
+         * ファイルを送ることになる（split_userhost と同じ理由）。 */
+        cdk_scp_args_t g;
+        memset(&g, 0xAA, sizeof(g));
+        cdk_scp_args_t before = g;
+
+        T_EQ_INT(cdk_shell_scp_parse("a.txt", "box:/p", &g), CDK_SCP_E_NO_USER);
+        T_EQ_MEM(&g, &before, sizeof(g));
+        T_EQ_INT(cdk_shell_scp_parse("a.txt", "b.txt", &g), CDK_SCP_E_BOTH_LOCAL);
+        T_EQ_MEM(&g, &before, sizeof(g));
+        T_EQ_INT(cdk_shell_scp_parse("a@x:/p", "b@y:/q", &g),
+                 CDK_SCP_E_BOTH_REMOTE);
+        T_EQ_MEM(&g, &before, sizeof(g));
+        T_EQ_INT(cdk_shell_scp_parse("a.txt", "@box:/p", &g),
+                 CDK_SCP_E_USERHOST);
+        T_EQ_MEM(&g, &before, sizeof(g));
+
+        /* NULL でも落ちない */
+        T_CHECK(cdk_shell_scp_parse(NULL, "a@b:/p", &g) != CDK_SCP_OK);
+        T_CHECK(cdk_shell_scp_parse("a", NULL, &g) != CDK_SCP_OK);
+        T_CHECK(cdk_shell_scp_parse("a", "a@b:/p", NULL) != CDK_SCP_OK);
+    }
+
+    T_CASE("scp: 長さの境目は切り詰めずに断る");
+    {
+        cdk_scp_args_t g;
+        char buf[400];
+
+        /* remote は 192 バイト。191 文字ちょうどは入る */
+        memset(buf, 'r', sizeof(buf));
+        snprintf(buf, sizeof(buf), "a@b:");
+        memset(buf + 4, 'r', 191);
+        buf[4 + 191] = '\0';
+        T_EQ_INT(cdk_shell_scp_parse("x", buf, &g), CDK_SCP_OK);
+        T_EQ_INT((int)strlen(g.remote), 191);
+
+        /* 1 文字はみ出したら断る */
+        memset(buf + 4, 'r', 192);
+        buf[4 + 192] = '\0';
+        T_EQ_INT(cdk_shell_scp_parse("x", buf, &g), CDK_SCP_E_TOOLONG);
+
+        /* local も 192 バイト */
+        memset(buf, 'l', 191);
+        buf[191] = '\0';
+        T_EQ_INT(cdk_shell_scp_parse(buf, "a@b:/p", &g), CDK_SCP_OK);
+        memset(buf, 'l', 192);
+        buf[192] = '\0';
+        T_EQ_INT(cdk_shell_scp_parse(buf, "a@b:/p", &g), CDK_SCP_E_TOOLONG);
+    }
+
     T_CASE("表示幅の計算");
     {
         /* 色付きプロンプトの幅を間違えるとカーソルがずれる。

@@ -70,14 +70,26 @@ bool cdk_wifi_ssid_is(const char *ssid);
 
 /* ---------------- SSH ---------------- */
 
+/* TCP を張るまでの期限 (ms)。
+ *
+ * **`libssh2_session_set_timeout()` では防げない。** あれは libssh2 自身の
+ * 呼び出しにしか効かず、その手前の TCP には届かない。
+ * `CONFIG_LWIP_TCP_SYNMAXRTX=12` なので、切らないと居ない IP で分単位。 */
+#define CDK_SSH_CONNECT_TIMEOUT_MS 8000
+
+/* ブロッキングで回している間の 1 呼び出しの期限 (ms)。
+ * 実測のハンドシェイクが約 1.9 秒なので、健全な相手では踏まない。 */
+#define CDK_SSH_CALL_TIMEOUT_MS 10000
+
+/* 繋いで認証するのに要るもの。**PTY のサイズは含めない。**
+ * scp は端末を開かないので、意味のない cols/rows を渡させない。 */
 typedef struct {
     const char *host;
-    uint16_t    port;      /* 0 なら 22 */
+    uint16_t    port;     /* 0 なら 22 */
     const char *user;
-    const char *password;
-    const char *term;      /* NULL なら "xterm-256color" */
-    int         cols;      /* cdk_term の実値を渡すこと。決め打ち禁止。 */
-    int         rows;
+    const char *password; /* **NULL 禁止。** 無いときは ""。
+                           * libssh2_userauth_password が strlen() に
+                           * 素通しするので NULL だと落ちる。 */
 
     /* 秘密鍵のパス。NULL か "" なら公開鍵認証を試さない。
      *
@@ -89,10 +101,43 @@ typedef struct {
      * `ssh-keygen` の既定が ed25519 なので、ここは必ず引っかかる。 */
     const char *key_path;
     const char *key_pass; /* 秘密鍵のパスフレーズ。NULL 可 */
+} cdk_ssh_login_t;
+
+typedef struct {
+    cdk_ssh_login_t login;
+    const char     *term; /* NULL なら "xterm-256color" */
+    int             cols; /* cdk_term の実値を渡すこと。決め打ち禁止。 */
+    int             rows;
 } cdk_ssh_config_t;
 
 /* 接続してシェルを開く。PTY まで張ってから返る。 */
 esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg);
+
+/* ---- チャネルを開かない接続（scp 用） ----
+ *
+ * TCP を張り、ハンドシェイクし、known_hosts と突き合わせ、認証するまで。
+ * **チャネルは開かない。** シェルが要るなら続けて `cdk_ssh_shell_open()`、
+ * ファイル転送なら `cdk_scp_*`。
+ *
+ * **認証の塊を 2 つ持たないためにここで切ってある。** 空パスワードで
+ * password 認証を叩かない判断、`.pub` を必ず渡す理由、ホスト鍵が
+ * 食い違ったら断る判断は、どれも実機で踏んだ末のもの（DESIGN.md §8.2）。
+ * 写すと片方が腐る。
+ *
+ * すでに開いているセッションがあれば `ESP_ERR_INVALID_STATE`。
+ * **黙って閉じない** — シェルの下からセッションを抜くことになる。
+ *
+ * 戻り値: `ESP_ERR_NOT_ALLOWED` = 認証失敗、
+ * `ESP_ERR_INVALID_STATE` = ホスト鍵の不一致か二重呼び出し。 */
+esp_err_t cdk_ssh_session_open(const cdk_ssh_login_t *login);
+
+/* PTY 付きのシェルを開き、ノンブロッキングへ切り替える。
+ * `cdk_ssh_session_open()` が成功したあとだけ呼べる。 */
+esp_err_t cdk_ssh_shell_open(const char *term, int cols, int rows);
+
+/* セッションとソケットだけ閉じる。**`s_open` と切断理由を触らない。**
+ * シェルを持たない経路（scp）の後片付け専用。 */
+void cdk_ssh_session_close(void);
 
 bool cdk_ssh_is_open(void);
 

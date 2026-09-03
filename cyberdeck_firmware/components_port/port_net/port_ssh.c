@@ -20,7 +20,9 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 static const char *TAG = "cdk_ssh";
@@ -99,7 +101,43 @@ static int connect_socket(const char *host, uint16_t port)
         freeaddrinfo(res);
         return -1;
     }
-    if (connect(sock, res->ai_addr, res->ai_addrlen) != 0) {
+    /* **connect() を待ち切らない。**
+     *
+     * `CONFIG_LWIP_TCP_SYNMAXRTX=12` なので、居ない IP へブロッキングで
+     * 繋ぐと SYN の再送が終わるまで**分単位で戻らない**。その間メインループが
+     * 止まり、画面もキーも死ぬ。`cdk_net.h` の WiFi のところに書いた
+     * 「待つ版は置かない」のと同じ理由で、ここも期限を持たせる。
+     *
+     * **`libssh2_session_set_timeout()` では防げない。** あれは libssh2
+     * 自身の呼び出しにしか効かず、その手前の TCP には届かない。
+     * 打ち間違えたホストで `ssh` が数分固まるのは元からの穴だった。 */
+    const int fl = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, fl | O_NONBLOCK);
+    int cr = connect(sock, res->ai_addr, res->ai_addrlen);
+    if (cr != 0 && errno == EINPROGRESS) {
+        fd_set wr;
+        FD_ZERO(&wr);
+        FD_SET(sock, &wr);
+        struct timeval tv = {.tv_sec = CDK_SSH_CONNECT_TIMEOUT_MS / 1000,
+                             .tv_usec = 0};
+        if (select(sock + 1, NULL, &wr, NULL, &tv) == 1) {
+            /* 書けるようになっただけでは繋がったと言えない。
+             * 失敗も「書ける」で上がってくるので SO_ERROR を見る。 */
+            int       soerr = 0;
+            socklen_t sl = sizeof(soerr);
+            getsockopt(sock, SOL_SOCKET, SO_ERROR, &soerr, &sl);
+            cr = (soerr == 0) ? 0 : -1;
+            errno = soerr;
+        } else {
+            ESP_LOGE(TAG, "%s:%u へ %d ms 以内に繋がりません", host,
+                     (unsigned)port, CDK_SSH_CONNECT_TIMEOUT_MS);
+            cr = -1;
+            errno = ETIMEDOUT;
+        }
+    }
+    /* ハンドシェイクと認証はブロッキングで通すので、向きを戻す。 */
+    fcntl(sock, F_SETFL, fl);
+    if (cr != 0) {
         ESP_LOGE(TAG, "connect() に失敗 errno=%d", errno);
         close(sock);
         freeaddrinfo(res);
@@ -113,12 +151,8 @@ static int connect_socket(const char *host, uint16_t port)
     return sock;
 }
 
-void cdk_ssh_close(void)
+void cdk_ssh_session_close(void)
 {
-    if (s_channel != NULL) {
-        libssh2_channel_free(s_channel);
-        s_channel = NULL;
-    }
     if (s_session != NULL) {
         libssh2_session_disconnect(s_session, "bye");
         libssh2_session_free(s_session);
@@ -128,6 +162,15 @@ void cdk_ssh_close(void)
         close(s_sock);
         s_sock = -1;
     }
+}
+
+void cdk_ssh_close(void)
+{
+    if (s_channel != NULL) {
+        libssh2_channel_free(s_channel);
+        s_channel = NULL;
+    }
+    cdk_ssh_session_close();
     /* **こちらから閉じたときは繋ぎ直さない。** 通信断で閉じた場合は
      * すでに read/write 側が理由を入れているので、そちらを消さない。 */
     if (s_open) {
@@ -136,13 +179,17 @@ void cdk_ssh_close(void)
     s_open = false;
 }
 
-esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
+esp_err_t cdk_ssh_session_open(const cdk_ssh_login_t *cfg)
 {
     if (cfg == NULL || cfg->host == NULL || cfg->user == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_open) {
-        cdk_ssh_close();
+    /* **黙って閉じない。** ここで閉じると、シェルが使っているセッションを
+     * 下から抜くことになる。入れ替えたいなら呼ぶ側が先に閉じる
+     * （`cdk_ssh_connect` はそうしている）。 */
+    if (s_open || s_session != NULL) {
+        ESP_LOGE(TAG, "すでにセッションがあります");
+        return ESP_ERR_INVALID_STATE;
     }
 
     if (!s_lib_inited) {
@@ -155,7 +202,10 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
 
     s_sock = connect_socket(cfg->host, cfg->port ? cfg->port : 22);
     if (s_sock < 0) {
-        return ESP_FAIL;
+        /* **届かなかったことを型で返す。** `ESP_FAIL` だと呼び出し側が
+         * 「相手に届いていない」と「向こうで断られた」を区別できず、
+         * 画面に出せるのが生のコードだけになる。 */
+        return ESP_ERR_NOT_FOUND;
     }
 
     s_session = libssh2_session_init();
@@ -167,6 +217,12 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
 
     /* ハンドシェイクと認証はブロッキングで通す。状態機械を書くほどの回数ではない。 */
     libssh2_session_set_blocking(s_session, 1);
+
+    /* **必ず入れる。** 既定は無制限で、相手が黙ると libssh2 のどの呼び出しからも
+     * 戻らない。ブロッキングで回している間はここが最後の防波堤。
+     * **ノンブロッキングへ切り替えるときに 0 へ戻すこと**（理由は
+     * `cdk_ssh_shell_open` の中に書いた）。 */
+    libssh2_session_set_timeout(s_session, CDK_SSH_CALL_TIMEOUT_MS);
 
     int rc = libssh2_session_handshake(s_session, s_sock);
     if (rc != 0) {
@@ -273,6 +329,17 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
         return ESP_ERR_NOT_ALLOWED;
     }
 
+    ESP_LOGI(TAG, "%s@%s の認証が通りました", cfg->user, cfg->host);
+    return ESP_OK;
+}
+
+esp_err_t cdk_ssh_shell_open(const char *term_name, int cols, int rows)
+{
+    if (s_session == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    int rc;
+
     s_channel = libssh2_channel_open_session(s_session);
     if (s_channel == NULL) {
         ESP_LOGE(TAG, "チャネルを開けません rc=%d",
@@ -284,15 +351,15 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
     /* ここが libssh2 を選んだ理由。端末名もサイズも引数で渡せる。
      * サイズは呼び出し側が cdk_term の実値を入れること。
      * 最終ハードの 80x26 を決め打ちすると試作機(53x20)で表示が崩れる。 */
-    const char *term = (cfg->term != NULL) ? cfg->term : "xterm-256color";
+    const char *term = (term_name != NULL) ? term_name : "xterm-256color";
     rc = libssh2_channel_request_pty_ex(s_channel, term, (unsigned int)strlen(term),
-                                        NULL, 0, cfg->cols, cfg->rows, 0, 0);
+                                        NULL, 0, cols, rows, 0, 0);
     if (rc != 0) {
         ESP_LOGE(TAG, "PTY 要求に失敗 rc=%d", rc);
         cdk_ssh_close();
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "PTY %s %dx%d", term, cfg->cols, cfg->rows);
+    ESP_LOGI(TAG, "PTY %s %dx%d", term, cols, rows);
 
     rc = libssh2_channel_shell(s_channel);
     if (rc != 0) {
@@ -302,14 +369,50 @@ esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
     }
 
     /* ここから先はメインループが回すのでノンブロッキングにする */
+
+    /* **期限を外す。外さないと待機中の SSH が勝手に切れる。**
+     * ノンブロッキングのままセッション期限を残すと、何も来ていないときの
+     * `libssh2_channel_read` が EAGAIN ではなく `LIBSSH2_ERROR_TIMEOUT` を
+     * 返す。`cdk_ssh_read` はそれを通信断として扱うので、**10 秒黙って
+     * いただけのセッションが切れて再接続が走る。** */
+    libssh2_session_set_timeout(s_session, 0);
     libssh2_session_set_blocking(s_session, 0);
     const int flags = fcntl(s_sock, F_GETFL, 0);
     fcntl(s_sock, F_SETFL, flags | O_NONBLOCK);
 
     s_open = true;
     s_disconnect = CDK_SSH_DISCONNECT_NONE;
-    ESP_LOGI(TAG, "%s@%s に接続しました", cfg->user, cfg->host);
+    ESP_LOGI(TAG, "シェルを開きました");
     return ESP_OK;
+}
+
+/* 繋いでシェルまで開く。従来の入口で、2 つを順に呼ぶだけ。 */
+esp_err_t cdk_ssh_connect(const cdk_ssh_config_t *cfg)
+{
+    if (cfg == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* 開いていたものは閉じる。
+     *
+     * **`s_open` だけを見ては駄目。** リモートが `exit` したときや通信が
+     * 切れたときは `cdk_ssh_read` / `cdk_ssh_write` が `s_open` を false に
+     * するだけで、セッションもソケットも解放していない。`s_session` が
+     * 残ったまま次を開こうとすることになる。
+     *
+     * 元のコードはそれを黙って上書きしていたので、**切断と再接続を
+     * 繰り返すたびに fd と libssh2 のセッションが漏れていた**
+     * （scp のために「二重に開かない」判定を足して初めて表に出た）。
+     *
+     * ここで閉じても `s_open` は false なので、`cdk_ssh_close()` は
+     * 切断理由を上書きしない。EOF で抜けたことは覚えたままになる。 */
+    if (s_open || s_session != NULL || s_sock >= 0) {
+        cdk_ssh_close();
+    }
+    const esp_err_t err = cdk_ssh_session_open(&cfg->login);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return cdk_ssh_shell_open(cfg->term, cfg->cols, cfg->rows);
 }
 
 bool cdk_ssh_is_open(void)

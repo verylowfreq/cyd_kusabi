@@ -109,6 +109,49 @@ int cdk_shell_split(char *line, char **argv, int max);
 bool cdk_shell_split_userhost(const char *s, char *user, size_t ucap, char *host,
                               size_t hcap);
 
+/* ---- scp の引数 ---- */
+
+/* `cdk_shell_scp_parse` の結果。OK 以外は out を触らない。 */
+typedef enum {
+    CDK_SCP_OK = 0,
+    CDK_SCP_E_BOTH_LOCAL,  /* `:` がどちらにも無い */
+    CDK_SCP_E_BOTH_REMOTE, /* `:` が両方にある */
+    CDK_SCP_E_NO_USER,     /* host:path の形だが `@` が無い */
+    CDK_SCP_E_USERHOST,    /* user@host として読めない */
+    CDK_SCP_E_NO_REMOTE,   /* 受信元が `user@host:` で空。何を取るか決まらない */
+    CDK_SCP_E_NO_LOCAL,    /* 手元側が空 */
+    CDK_SCP_E_TOOLONG      /* どれかが入らない。切り詰めない */
+} cdk_scp_parse_t;
+
+typedef struct {
+    char user[48];
+    char host[80];
+    char remote[192];
+    char local[192];
+    /* remote が空。送信のときだけ許して、手元のファイル名を使う。 */
+    bool remote_is_empty;
+    bool upload; /* true = 手元 → 向こう */
+} cdk_scp_args_t;
+
+/* `scp` の引数 2 つを分解する。
+ *
+ * **どちらが向こう側かは「最初の `/` より前に `:` があるか」で決める。**
+ * Linux の scp と同じ規則。こうすると `/sdcard/a:b` は手元のまま扱えて、
+ * `box:/tmp/a` は向こう側になる。
+ *
+ * **区切りは最初の `:`。** それより後ろは全部向こうのパスで、`:` を
+ * 含んでよい（Linux も同じ）。`user@host` の分解は
+ * `cdk_shell_split_userhost` に任せる。**規則を 2 か所に持たない。**
+ *
+ * 向こう側の形をしているのに `@` が無いものは **`E_NO_USER` で断る。**
+ * この機械に「手元のユーザー名」は無いので補えないし、黙って設定の相手へ
+ * 繋ぐと打ち間違えた宛先へファイルを送ることになる。
+ *
+ * **OK 以外のとき out には何も書かない。** 半端に埋めると、呼び側が
+ * 「宛先は取れた」と誤解して別の相手・別のファイルを触る。 */
+cdk_scp_parse_t cdk_shell_scp_parse(const char *a, const char *b,
+                                    cdk_scp_args_t *out);
+
 /* 画面上で何桁ぶんになるかを数える。
  * エスケープ列は 0 桁、全角は 2 桁。色付きプロンプトの幅計算に要る。 */
 int cdk_shell_visible_width(const char *s, size_t len);

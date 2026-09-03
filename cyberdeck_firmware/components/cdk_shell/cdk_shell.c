@@ -391,6 +391,106 @@ bool cdk_shell_split_userhost(const char *s, char *user, size_t ucap, char *host
     return true;
 }
 
+/* 向こう側を指す `:` を返す。無ければ NULL。
+ *
+ * **`/` より前にある `:` だけを数える。** これが Linux の scp の規則で、
+ * `/sdcard/a:b` を手元のパスとして扱うために要る。逆にしてしまうと、
+ * コロンを含む名前のファイルが送れなくなる。 */
+static const char *remote_colon(const char *s)
+{
+    for (const char *p = s; *p != '\0'; p++) {
+        if (*p == '/') {
+            return NULL; /* パスが始まった。ここから先の `:` は名前の一部 */
+        }
+        if (*p == ':') {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* 収まるなら写して true。**入らないなら何もしないで false。** */
+static bool fit(char *dst, size_t cap, const char *src, size_t len)
+{
+    if (len + 1u > cap) {
+        return false;
+    }
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+    return true;
+}
+
+cdk_scp_parse_t cdk_shell_scp_parse(const char *a, const char *b,
+                                    cdk_scp_args_t *out)
+{
+    if (a == NULL || b == NULL || out == NULL) {
+        return CDK_SCP_E_BOTH_LOCAL;
+    }
+    const char *ca = remote_colon(a);
+    const char *cb = remote_colon(b);
+
+    if (ca != NULL && cb != NULL) {
+        return CDK_SCP_E_BOTH_REMOTE;
+    }
+    if (ca == NULL && cb == NULL) {
+        return CDK_SCP_E_BOTH_LOCAL;
+    }
+
+    const bool upload = (cb != NULL); /* 向こう側が後ろなら送信 */
+    const char *rspec = upload ? b : a;      /* user@host:path */
+    const char *rcolon = upload ? cb : ca;
+    const char *local = upload ? a : b;
+
+    if (local[0] == '\0') {
+        return CDK_SCP_E_NO_LOCAL;
+    }
+
+    /* `user@host` の部分。`@` が無ければ断る。 */
+    const size_t uhlen = (size_t)(rcolon - rspec);
+    bool has_at = false;
+    for (size_t i = 0; i < uhlen; i++) {
+        if (rspec[i] == '@') {
+            has_at = true;
+            break;
+        }
+    }
+    if (!has_at) {
+        return CDK_SCP_E_NO_USER;
+    }
+
+    /* 分解のために一度切り出す。**out へは最後にまとめて書く。** */
+    char uh[128];
+    if (!fit(uh, sizeof(uh), rspec, uhlen)) {
+        return CDK_SCP_E_TOOLONG;
+    }
+
+    cdk_scp_args_t tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    if (!cdk_shell_split_userhost(uh, tmp.user, sizeof(tmp.user), tmp.host,
+                                  sizeof(tmp.host))) {
+        return CDK_SCP_E_USERHOST;
+    }
+
+    const char *rpath = rcolon + 1;
+    if (rpath[0] == '\0') {
+        /* 送信なら手元の名前を使えるが、**受信では何を取るか決まらない。** */
+        if (!upload) {
+            return CDK_SCP_E_NO_REMOTE;
+        }
+        tmp.remote_is_empty = true;
+    }
+    if (!fit(tmp.remote, sizeof(tmp.remote), rpath, strlen(rpath))) {
+        return CDK_SCP_E_TOOLONG;
+    }
+    if (!fit(tmp.local, sizeof(tmp.local), local, strlen(local))) {
+        return CDK_SCP_E_TOOLONG;
+    }
+    tmp.upload = upload;
+
+    *out = tmp;
+    return CDK_SCP_OK;
+}
+
 void cdk_shell_notify(cdk_shell_t *sh, const char *s)
 {
     if (!sh->active || s == NULL) {
