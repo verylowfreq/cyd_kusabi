@@ -299,6 +299,41 @@ int main(void)
         eq_line("", "行は変わらない");
     }
 
+    T_CASE("割り込みの知らせは打ちかけの行を残す");
+    {
+        /* WiFi の接続結果のように後から届く知らせ。**打っていた文字を
+         * 消してはいけない。** 消えると打ち直しになる。 */
+        setup();
+        type("ssh ");
+        OUTLEN = 0;
+        OUT[0] = '\0';
+        cdk_shell_notify(&SH, "wifi  : 接続 192.168.1.97");
+
+        eq_line("ssh ", "行はそのまま");
+        T_EQ_INT(SH.cursor, 4);
+        T_CHECK(strstr(OUT, "wifi  : 接続 192.168.1.97") != NULL);
+        /* 行頭へ戻して消してから書く（プロンプトの途中に挟まらない） */
+        T_CHECK(strncmp(OUT, "\r\033[K", 3) == 0);
+        /* 知らせのあとにプロンプトと行が描き直されている */
+        T_CHECK(strstr(OUT, "ssh ") != NULL);
+        T_CHECK(strstr(OUT, "ssh ") > strstr(OUT, "wifi  :"));
+    }
+
+    T_CASE("シェルが止まっている間は知らせを出さない");
+    {
+        /* SSH やエディタに入っている間に書くと、そちらの画面が壊れる。 */
+        setup();
+        cdk_shell_end(&SH);
+        OUTLEN = 0;
+        OUT[0] = '\0';
+        cdk_shell_notify(&SH, "wifi  : 接続 192.168.1.97");
+        T_EQ_INT((int)OUTLEN, 0);
+
+        /* NULL でも落ちない */
+        cdk_shell_begin(&SH);
+        cdk_shell_notify(&SH, NULL);
+    }
+
     T_CASE("行の分割");
     {
         char buf[128];

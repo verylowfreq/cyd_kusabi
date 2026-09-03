@@ -80,6 +80,17 @@ void cdk_shell_key(cdk_shell_t *sh, const cdk_key_t *key);
 void cdk_shell_write(cdk_shell_t *sh, const char *s);
 void cdk_shell_printf(cdk_shell_t *sh, const char *fmt, ...);
 
+/* 入力途中の行に割り込んで 1 行知らせる。**打ちかけの文字を消さない。**
+ *
+ * WiFi の接続結果のように、コマンドと無関係に後から届く知らせのため。
+ * 素の printf で割り込むと、プロンプトと入力中の行の途中に文字が挟まって
+ * 何を打っていたか分からなくなる。行頭へ戻して消し、知らせを出してから
+ * プロンプトと行を描き直す。
+ *
+ * s は改行を含めないこと（末尾に CRLF を足す）。
+ * シェルが止まっている（active でない）ときは何もしない。 */
+void cdk_shell_notify(cdk_shell_t *sh, const char *s);
+
 /* ---- テストしやすいように公開している内部処理 ---- */
 
 /* line を argv に分割する。引用符 " と ' を解釈し、line を書き換える。

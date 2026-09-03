@@ -369,6 +369,17 @@ void cdk_shell_end(cdk_shell_t *sh)
     sh->active = false;
 }
 
+void cdk_shell_notify(cdk_shell_t *sh, const char *s)
+{
+    if (!sh->active || s == NULL) {
+        return;
+    }
+    emit(sh, "\r\033[K", 4);
+    emit(sh, s, strlen(s));
+    emit(sh, "\r\n", 2);
+    redraw(sh);
+}
+
 bool cdk_shell_active(const cdk_shell_t *sh)
 {
     return sh->active;

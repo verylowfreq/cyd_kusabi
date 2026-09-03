@@ -25,6 +25,10 @@ extern "C" {
 typedef struct {
     bool        wifi_up;
     const char *ip;   /* NULL か "" なら出さない */
+    /* 繋ぎに行っている最中か。**IP より弱い。** 繋がったあとに切れて
+     * 繋ぎ直している間も立つので、両方立っていたら IP を出す
+     * （古いフラグのせいで生きている IP を隠さない）。 */
+    bool        wifi_connecting;
     bool        sd_ok;
     uint32_t    sd_mb;
     const char *ime;  /* かな入力の状態表示。NULL なら出さない */

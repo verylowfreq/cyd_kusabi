@@ -4,9 +4,8 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "libssh2.h"
 #include "cdk_cfg.h"
 
@@ -14,20 +13,43 @@
 
 static const char *TAG = "cdk_net";
 
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAILED_BIT    BIT1
+static esp_netif_t   *s_netif;
+static bool           s_inited;
+static bool           s_connected;
+static esp_ip4_addr_t s_ip;
+static int            s_last_reason;
 
-static EventGroupHandle_t s_events;
-static esp_netif_t       *s_netif;
-static bool               s_inited;
-static bool               s_connected;
-static esp_ip4_addr_t     s_ip;
-static int                s_last_reason;
+/* 状態はイベントタスクが書き、メインループが読む。**volatile が要る。**
+ * 32bit の enum なので読み書きは分割されない（読んだ値は必ずどれか 1 つ）。 */
+static volatile cdk_wifi_state_t s_state;
 
-/* 接続中だけ自動再接続する。切断は「失敗」として上位に返したいので、
- * 接続待ちの間だけリトライし、確立後はドライバ任せにしない。 */
-static bool s_connecting;
-static int  s_retries;
+/* 最初の接続を諦める刻限 (ms)。0 なら期限なし。
+ *
+ * **期限の有無が 2 つの繋ぎ方を分ける。** 期限つき = 起動時やコマンドで
+ * 繋ぎに行っている最中で、諦めたら FAILED にして人に知らせる。
+ * 期限なし = 一度は繋がったあとに切れた場合で、こちらは黙って繋ぎ直し
+ * 続ける（電波が戻れば勝手に戻ってほしい）。
+ *
+ * **64bit で持ってはいけない。** これもイベントタスクが書いてメインループが
+ * 読む。64bit の書き込みは 2 語に分かれるので、読む側が半分だけ新しい値を
+ * 拾える。「0 を書いた直後の裂けた値」が 0 でない過去の時刻に見えると、
+ * 諦めないはずの再接続が FAILED に落ちて二度と繋がらなくなる。 */
+static volatile uint32_t s_deadline_ms;
+
+static uint32_t s_timeout_ms;
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* 刻限を過ぎたか。**引き算してから符号を見る**ので 49 日で一周しても正しい。 */
+static bool past(uint32_t deadline_ms)
+{
+    return (int32_t)(now_ms() - deadline_ms) > 0;
+}
+
+static int s_retries;
 #define MAX_RETRIES 5
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -35,26 +57,31 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     (void)arg;
     (void)base;
 
-    if (id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-        return;
-    }
+    /* **STA_START では繋ぎに行かない。** 繋ぎに行くのは
+     * cdk_wifi_connect_start() だけ、という 1 本道にしてある。理由は
+     * そちらのコメント（esp_wifi_start の戻り値）を参照。 */
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *ev = data;
         s_last_reason = ev->reason;
         s_connected = false;
 
-        if (s_connecting && s_retries < MAX_RETRIES) {
-            s_retries++;
-            ESP_LOGW(TAG, "切断 reason=%d 再試行 %d/%d", ev->reason, s_retries,
-                     MAX_RETRIES);
-            esp_wifi_connect();
-        } else if (s_connecting) {
-            ESP_LOGE(TAG, "接続を諦めます reason=%d", ev->reason);
-            xEventGroupSetBits(s_events, WIFI_FAILED_BIT);
-        } else {
-            /* 確立後の切断。放っておくと戻らないので繋ぎ直す。 */
+        if (s_state == CDK_WIFI_CONNECTING && s_deadline_ms != 0) {
+            /* 最初の接続。回数で諦める。 */
+            if (s_retries < MAX_RETRIES) {
+                s_retries++;
+                ESP_LOGW(TAG, "切断 reason=%d 再試行 %d/%d", ev->reason, s_retries,
+                         MAX_RETRIES);
+                esp_wifi_connect();
+            } else {
+                ESP_LOGE(TAG, "接続を諦めます reason=%d", ev->reason);
+                s_state = CDK_WIFI_FAILED;
+            }
+        } else if (s_state == CDK_WIFI_CONNECTED || s_state == CDK_WIFI_CONNECTING) {
+            /* 確立後の切断。放っておくと戻らないので繋ぎ直す。
+             * 諦めないので期限は持たない。 */
             ESP_LOGW(TAG, "接続が切れました reason=%d 再接続します", ev->reason);
+            s_state = CDK_WIFI_CONNECTING;
+            s_deadline_ms = 0;
             esp_wifi_connect();
         }
     }
@@ -70,8 +97,9 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
         s_ip = ev->ip_info.ip;
         s_connected = true;
         s_retries = 0;
+        s_deadline_ms = 0;
+        s_state = CDK_WIFI_CONNECTED;
         ESP_LOGI(TAG, "IP 取得 " IPSTR, IP2STR(&s_ip));
-        xEventGroupSetBits(s_events, WIFI_CONNECTED_BIT);
     }
 }
 
@@ -94,11 +122,6 @@ esp_err_t cdk_wifi_init(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "esp_wifi_init");
 
-    s_events = xEventGroupCreate();
-    if (s_events == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
     ESP_RETURN_ON_ERROR(esp_event_handler_instance_register(
                             WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL, NULL),
                         TAG, "wifi handler");
@@ -114,7 +137,8 @@ esp_err_t cdk_wifi_init(void)
     return ESP_OK;
 }
 
-esp_err_t cdk_wifi_connect(const char *ssid, const char *psk, uint32_t timeout_ms)
+esp_err_t cdk_wifi_connect_start(const char *ssid, const char *psk,
+                                 uint32_t timeout_ms)
 {
     if (!s_inited || ssid == NULL) {
         return ESP_ERR_INVALID_STATE;
@@ -131,10 +155,23 @@ esp_err_t cdk_wifi_connect(const char *ssid, const char *psk, uint32_t timeout_m
      * 前の AP に繋がったままだと、そちらのほうが分かりにくい。 */
     if (cdk_wifi_ssid_is(ssid)) {
         ESP_LOGI(TAG, "すでに %s に接続しています", ssid);
+        s_state = CDK_WIFI_CONNECTED;
         return ESP_OK;
     }
-    if (s_connected) {
-        ESP_LOGI(TAG, "別の AP へ移ります");
+    /* **繋がっているときだけでなく、繋ぎに行っている最中も止める。**
+     *
+     * esp_wifi_connect() は「まだ前の相手を探している」状態だと
+     * ESP_ERR_WIFI_STATE を返して何もしない。起動直後は必ずこの状態なので、
+     * 「起動 → 繋がらない → SSID を直して wifi connect」という、待たなく
+     * なったことで普通になった順序がそのまま弾かれる（実機で踏んだ）。
+     *
+     * **先に IDLE へ落とす。** ここで上がる DISCONNECTED を「繋いでいる
+     * 最中に切れた」と取られると、まだ古い設定のまま esp_wifi_connect() が
+     * 呼ばれて元の AP へ戻ってしまう。 */
+    if (s_connected || s_state == CDK_WIFI_CONNECTING) {
+        ESP_LOGI(TAG, "前の接続を止めます");
+        s_state = CDK_WIFI_IDLE;
+        s_deadline_ms = 0;
         (void)esp_wifi_disconnect();
     }
 
@@ -149,38 +186,71 @@ esp_err_t cdk_wifi_connect(const char *ssid, const char *psk, uint32_t timeout_m
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wc), TAG, "set_config");
 
-    xEventGroupClearBits(s_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT);
-    s_connecting = true;
+    /* **状態と期限はドライバを叩く前に置く。** 逆にすると、
+     * esp_wifi_connect() がすぐ失敗して DISCONNECTED が上がったときに
+     * まだ IDLE のままで、イベント側がどちらの枝にも入らず取りこぼす。 */
     s_retries = 0;
     s_last_reason = 0;
+    s_timeout_ms = timeout_ms;
+    /* 0 は「期限なし」の意味なので、ちょうど 0 になったら 1 ずらす。
+     * 49 日に 1 度しか当たらないが、当たると永久に諦めなくなる。 */
+    s_deadline_ms = now_ms() + timeout_ms;
+    if (s_deadline_ms == 0) {
+        s_deadline_ms = 1;
+    }
+    s_state = CDK_WIFI_CONNECTING;
 
-    /* 2 回目以降は start 済みなので connect を直接叩く */
+    /* **esp_wifi_start() は 2 回目以降も ESP_OK を返す**（冪等）。
+     * ESP_ERR_WIFI_NOT_STOPPED ではない。
+     *
+     * ここを取り違えて「ESP_OK なら STA_START イベントが繋ぎに行く」と
+     * していたのが不具合 #60。STA_START は**最初の 1 回しか上がらない**ので、
+     * 2 回目以降の `wifi connect` は誰も esp_wifi_connect() を呼ばないまま
+     * 20 秒待って reason=0 で失敗していた。ドライバは何もしていないので
+     * ログにも一切出ず、「黙って繋がらない」としか見えない。
+     *
+     * 直し方は**イベント頼みをやめること**。start が通ったら必ず自分で
+     * 繋ぎに行き、戻り値も見る。繋ぎに行く道が 1 本になる。 */
     const esp_err_t started = esp_wifi_start();
-    if (started == ESP_ERR_WIFI_NOT_STOPPED || started == ESP_OK) {
-        if (started == ESP_OK) {
-            /* STA_START イベントが esp_wifi_connect() を呼ぶ */
-        } else {
-            esp_wifi_connect();
-        }
-    } else {
-        s_connecting = false;
+    if (started != ESP_OK && started != ESP_ERR_WIFI_NOT_STOPPED) {
+        s_state = CDK_WIFI_FAILED;
+        s_deadline_ms = 0;
         ESP_RETURN_ON_ERROR(started, TAG, "esp_wifi_start");
     }
 
-    ESP_LOGI(TAG, "%s に接続中...", ssid);
-    const EventBits_t bits =
-        xEventGroupWaitBits(s_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT, pdFALSE,
-                            pdFALSE, pdMS_TO_TICKS(timeout_ms));
-    s_connecting = false;
+    esp_err_t rc = esp_wifi_connect();
+    if (rc == ESP_ERR_WIFI_STATE) {
+        /* 上で止めたつもりでも、ドライバが状態を落とし切る前に来ることが
+         * ある。**もう一度だけ切ってから頼む。** 際限なく粘らないのは、
+         * ここで回るとメインループが止まるから。 */
+        ESP_LOGW(TAG, "まだ前の状態が残っています。切り直します");
+        (void)esp_wifi_disconnect();
+        rc = esp_wifi_connect();
+    }
+    if (rc != ESP_OK) {
+        /* 繋ぎに行けていないのに CONNECTING で待つと、また 20 秒黙る。 */
+        ESP_LOGE(TAG, "esp_wifi_connect が失敗 %s", esp_err_to_name(rc));
+        s_state = CDK_WIFI_FAILED;
+        s_deadline_ms = 0;
+        return rc;
+    }
 
-    if (bits & WIFI_CONNECTED_BIT) {
-        return ESP_OK;
+    ESP_LOGI(TAG, "%s に接続中...", ssid);
+    return ESP_OK;
+}
+
+cdk_wifi_state_t cdk_wifi_poll(void)
+{
+    /* 時間切れはここでしか見ない。イベントは「切れた」ことしか教えて
+     * くれないので、AP が黙っている（応答も切断も返さない）場合は
+     * 誰かが時計を見ないと CONNECTING のまま止まる。 */
+    const uint32_t deadline = s_deadline_ms; /* 1 回だけ読む */
+    if (s_state == CDK_WIFI_CONNECTING && deadline != 0 && past(deadline)) {
+        ESP_LOGE(TAG, "接続がタイムアウトしました (%u ms)", (unsigned)s_timeout_ms);
+        s_deadline_ms = 0;
+        s_state = CDK_WIFI_FAILED;
     }
-    if (bits & WIFI_FAILED_BIT) {
-        return ESP_ERR_WIFI_NOT_CONNECT;
-    }
-    ESP_LOGE(TAG, "接続がタイムアウトしました (%u ms)", (unsigned)timeout_ms);
-    return ESP_ERR_TIMEOUT;
+    return s_state;
 }
 
 bool cdk_wifi_ssid_is(const char *ssid)

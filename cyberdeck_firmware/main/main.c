@@ -103,6 +103,14 @@ static uint32_t now_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+/* ---- WiFi ----
+ * 直前に見た状態。**変わった瞬間だけシェルへ 1 行返す**ために覚えておく。
+ * 起動時の接続は待たない（DESIGN.md §8.1）ので、結果はここを見て気づく。 */
+static cdk_wifi_state_t s_wifi_state = CDK_WIFI_IDLE;
+/* いま繋ぎに行っている SSID。**設定値 (s_wifi_ssid) とは別物。**
+ * 設定を書き換えても、走っている試行の相手は変わらないため。 */
+static char s_wifi_trying[64];
+
 /* ---- 再接続 ----
  * WiFi が切れたり相手が落ちたりしたときに繋ぎ直す。
  * **リモートで `exit` したときは繋ぎ直さない**（抜けられなくなる）。
@@ -536,6 +544,7 @@ static void draw_status(bool force)
     memset(&st, 0, sizeof(st));
     st.wifi_up = cdk_wifi_is_connected();
     st.ip = ip;
+    st.wifi_connecting = (s_wifi_state == CDK_WIFI_CONNECTING);
     st.sd_ok = cdk_sd_mounted();
     st.sd_mb = s_sd_mb;
     st.ime = cdk_skk_mode_label(&s_skk);
@@ -775,6 +784,12 @@ static void load_config(void)
     cfg_load(CDK_CFG_SSH_PASS, s_ssh_pass, sizeof(s_ssh_pass));
 }
 
+/* 接続を始めるだけ。**待たない。**
+ *
+ * 待つと、AP が居ない場所で起動が 20 秒止まる。その間キーも効かないので、
+ * 設定を直すことも `wifi connect` をやり直すこともできない。
+ * 途中経過はステータス帯（「WiFi接続中」→ IP）に出し、結果は
+ * wifi_pump() がシェルへ 1 行返す。 */
 static void app_wifi_connect(void)
 {
     load_config();
@@ -788,6 +803,20 @@ static void app_wifi_connect(void)
         return;
     }
 
+    /* **同じ SSID を繋ぎに行っている最中なら重ねない。** 待たなくなったぶん
+     * `wifi connect` を続けて叩けてしまう。叩くたびに今の試行を捨てて
+     * 最初からやり直すので、いつまでも繋がらない。
+     *
+     * **SSID を変えたときは通す。** 確立後の切断は期限なしで繋ぎ直し続ける
+     * ので、AP が消えた場所では CONNECTING のまま留まる。そこで
+     * `set wifi.ssid <別の AP>` → `wifi connect` を弾くと、再起動しないと
+     * 別の AP へ移れない（取扱説明書 9 章の直し方がそのまま効かなくなる）。 */
+    if (s_wifi_state == CDK_WIFI_CONNECTING &&
+        strcmp(s_wifi_ssid, s_wifi_trying) == 0) {
+        term_printf("wifi  : %s に接続中です\r\n", s_wifi_ssid);
+        return;
+    }
+
     /* すでに繋がっているなら「接続中...」を出さない。
      * 出してから即「接続」と続くと、繋ぎ直したように見える。 */
     if (cdk_wifi_ssid_is(s_wifi_ssid)) {
@@ -798,18 +827,66 @@ static void app_wifi_connect(void)
         return;
     }
 
-    term_printf("wifi  : %s に接続中...\r\n", s_wifi_ssid);
-
-    const esp_err_t err = cdk_wifi_connect(s_wifi_ssid, s_wifi_psk, 20000);
+    const esp_err_t err = cdk_wifi_connect_start(s_wifi_ssid, s_wifi_psk, 20000);
     if (err != ESP_OK) {
-        term_printf("\033[31mwifi  : 失敗 %s reason=%d\033[0m\r\n",
-                    esp_err_to_name(err), cdk_wifi_last_disconnect_reason());
+        term_printf("\033[31mwifi  : 開始できません %s\033[0m\r\n",
+                    esp_err_to_name(err));
+        return;
+    }
+    s_wifi_state = cdk_wifi_poll();
+    strncpy(s_wifi_trying, s_wifi_ssid, sizeof(s_wifi_trying) - 1);
+    s_wifi_trying[sizeof(s_wifi_trying) - 1] = '\0';
+    term_printf("wifi  : %s に接続中...\r\n", s_wifi_ssid);
+}
+
+/* WiFi の状態が変わったらシェルへ 1 行返す。メインループから毎周呼ぶ。
+ *
+ * **シェルに居るときだけ書く。** SSH の向こうやエディタ、ユーザーアプリの
+ * 画面に「wifi : 接続 ...」が割り込むと、そちらの表示が壊れる。
+ * 出さなくても状態はステータス帯に出ている。 */
+static void wifi_pump(void)
+{
+    const cdk_wifi_state_t now = cdk_wifi_poll();
+    if (now == s_wifi_state) {
+        return;
+    }
+    const cdk_wifi_state_t was = s_wifi_state;
+    s_wifi_state = now;
+
+    if (s_session != SESSION_SHELL) {
         return;
     }
 
-    char ip[20];
-    cdk_wifi_ip(ip, sizeof(ip));
-    term_printf("wifi  : \033[32m接続 %s\033[0m\r\n", ip);
+    /* 切り詰められると UTF-8 が途中で切れる。いちばん長い「失敗」の
+     * 行で 80 バイトほどなので、余裕を持たせておく。 */
+    char msg[128];
+    if (now == CDK_WIFI_CONNECTED) {
+        char ip[20];
+        cdk_wifi_ip(ip, sizeof(ip));
+        snprintf(msg, sizeof(msg), "wifi  : \033[32m接続 %s\033[0m", ip);
+    } else if (now == CDK_WIFI_FAILED) {
+        /* 桁が狭いときは短く出す。**折り返すと 12 行しかない画面で
+         * 1 行余計に食う。** skk の起動行と同じ理由・同じ分け方。
+         * やり直し方は取扱説明書 9 章にある。 */
+        if (s_term.cols < 60) {
+            snprintf(msg, sizeof(msg), "\033[31mwifi  : 失敗 reason=%d\033[0m",
+                     cdk_wifi_last_disconnect_reason());
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "\033[31mwifi  : 失敗 reason=%d（wifi connect でやり直せます）"
+                     "\033[0m",
+                     cdk_wifi_last_disconnect_reason());
+        }
+    } else if (now == CDK_WIFI_CONNECTING && was == CDK_WIFI_CONNECTED) {
+        /* 繋がっていたのが切れた。放っておいても繋ぎ直すが、
+         * 黙って落ちると「なぜか通らない」になる。 */
+        snprintf(msg, sizeof(msg),
+                 "\033[33mwifi  : 切れました。繋ぎ直しています\033[0m");
+    } else {
+        return;
+    }
+    /* シェルが止まっていれば何も出ない。s_dirty は shell_out が立てる。 */
+    cdk_shell_notify(&s_shell, msg);
 }
 
 static void app_wifi_status(void)
@@ -1142,7 +1219,8 @@ void app_main(void)
         term_printf("\033[33mskk   : 辞書がありません\033[0m\r\n");
     }
 
-    /* 起動時に WiFi まで繋いでおく。SSH は `ssh` コマンドで入る。
+    /* 起動時に WiFi を繋ぎに行っておく。**待たない**（DESIGN.md §8.1）。
+     * SSH は `ssh` コマンドで入る。
      * 自動で SSH に入るとシェルに触れないまま起動が終わってしまう。 */
     app_wifi_connect();
 
@@ -1232,6 +1310,9 @@ void app_main(void)
                 }
             }
         }
+
+        /* WiFi。**待たずに繋ぎに行っている**ので、結果はここで受け取る。 */
+        wifi_pump();
 
         /* ステータス帯。内容が変わったときだけ描き直す。 */
         draw_status(false);

@@ -70,8 +70,13 @@ size_t cdk_status_format(const cdk_status_t *st, int cols, char *out, size_t cap
         (void)push(out, cap, &len, &w, cols, seg);
     }
 
+    /* 繋がっていれば IP、繋ぎに行っている最中なら「接続中」、
+     * どちらでもなければ「--」。**IP を最優先にする。** 繋ぎ直している
+     * 途中でも前の IP はまだ意味を持つことがあり、隠すと打ち直せない。 */
     if (st->wifi_up && st->ip != NULL && st->ip[0] != '\0') {
         snprintf(seg, sizeof(seg), "%s", st->ip);
+    } else if (st->wifi_connecting) {
+        snprintf(seg, sizeof(seg), "WiFi接続中");
     } else {
         snprintf(seg, sizeof(seg), "WiFi--");
     }

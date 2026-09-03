@@ -20,9 +20,30 @@ extern "C" {
 /* NVS / netif / event loop / WiFi ドライバを初期化する。接続はまだしない。 */
 esp_err_t cdk_wifi_init(void);
 
-/* STA として接続し、IP が取れるまで待つ。timeout_ms で諦める。
- * 何度呼んでもよい（再接続に使える）。 */
-esp_err_t cdk_wifi_connect(const char *ssid, const char *psk, uint32_t timeout_ms);
+typedef enum {
+    CDK_WIFI_IDLE = 0,   /* まだ繋ぎに行っていない */
+    CDK_WIFI_CONNECTING, /* 繋ぎに行っている最中 */
+    CDK_WIFI_CONNECTED,  /* IP まで取れた */
+    CDK_WIFI_FAILED      /* 諦めた。理由は cdk_wifi_last_disconnect_reason() */
+} cdk_wifi_state_t;
+
+/* 接続を始めて**すぐ返る**。待たない。
+ *
+ * **待つ版は置かない。** 起動時に IP が取れるまで待つと、AP が居ない場所で
+ * 20 秒画面が止まる。その間キーも効かないので、電源を切る以外に手が無い。
+ * 結果は cdk_wifi_poll() で受け取り、途中の状態はステータス帯に出す。
+ *
+ * timeout_ms を過ぎても IP が取れなければ CDK_WIFI_FAILED になる。
+ * ただし**一度でも IP が取れたあとに切れた場合は諦めない**。期限を持たず、
+ * 電波が戻るまで繋ぎ直し続ける（帯は「WiFi接続中」のまま）。
+ *
+ * 何度呼んでもよいが、CONNECTING の間に呼び直すと今の試行を捨てる。 */
+esp_err_t cdk_wifi_connect_start(const char *ssid, const char *psk,
+                                 uint32_t timeout_ms);
+
+/* いまの状態。**呼ぶたびに時間切れを見る**ので、繋ぎに行っている間は
+ * メインループから定期的に呼ぶこと。呼ばないと CONNECTING のまま止まる。 */
+cdk_wifi_state_t cdk_wifi_poll(void);
 
 bool cdk_wifi_is_connected(void);
 

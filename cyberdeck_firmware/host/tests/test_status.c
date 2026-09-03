@@ -85,11 +85,47 @@ int main(void)
         st.ime = "英数";
         cdk_status_format(&st, 80, BUF, sizeof(BUF));
         T_CHECK(strstr(BUF, "WiFi--") != NULL);
+        T_CHECK(strstr(BUF, "接続中") == NULL);
         T_CHECK(strstr(BUF, "SD--") != NULL);
         T_CHECK(strstr(BUF, "SSH") == NULL);
         T_CHECK(strstr(BUF, "KBD") == NULL);
         /* 電池電圧は 0 なら出さない（読めていないのに 0.00V と出すと嘘になる） */
         T_CHECK(strstr(BUF, "V") == NULL);
+    }
+
+    T_CASE("繋ぎに行っている最中は「WiFi接続中」");
+    {
+        cdk_status_t st;
+        memset(&st, 0, sizeof(st));
+        st.wifi_connecting = true;
+        cdk_status_format(&st, 80, BUF, sizeof(BUF));
+        T_CHECK(strstr(BUF, "WiFi接続中") != NULL);
+        T_CHECK(strstr(BUF, "WiFi--") == NULL);
+        /* 全角 3 文字ぶん = 10 桁。40 桁でも先頭に置ける。 */
+        T_EQ_INT(cdk_status_width("WiFi接続中"), 10);
+    }
+
+    T_CASE("IP が取れていれば接続中より IP を出す");
+    {
+        /* 一度繋がったあとに切れて繋ぎ直している間は両方立つ。
+         * **前の IP がまだ意味を持つので、隠さない。** */
+        cdk_status_t st = full();
+        st.wifi_connecting = true;
+        cdk_status_format(&st, 80, BUF, sizeof(BUF));
+        T_CHECK(strstr(BUF, "192.168.1.97") != NULL);
+        T_CHECK(strstr(BUF, "接続中") == NULL);
+    }
+
+    T_CASE("接続中でも 40 桁を超えない");
+    {
+        cdk_status_t st = full();
+        st.wifi_up = false;
+        st.wifi_connecting = true;
+        cdk_status_format(&st, 40, BUF, sizeof(BUF));
+        T_CHECK(cdk_status_width(BUF) <= 40);
+        T_CHECK(strstr(BUF, "WiFi接続中") != NULL);
+        /* 途中でちょん切って「WiFi接」にしない */
+        T_CHECK(strstr(BUF, "WiFi接続") != NULL);
     }
 
     T_CASE("MB と GB の切り替え");

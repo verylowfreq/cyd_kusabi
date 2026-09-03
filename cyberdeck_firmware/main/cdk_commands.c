@@ -226,8 +226,17 @@ static int cmd_wifi(int argc, char **argv, void *user)
     if (argc == 1 || strcmp(argv[1], "status") == 0) {
         char ip[20];
         cdk_wifi_ip(ip, sizeof(ip));
-        cdk_shell_printf(sh, "%s  ip=%s  直近の切断理由=%d\r\n",
-                         cdk_wifi_is_connected() ? "\033[32m接続\033[0m" : "未接続", ip,
+        /* 帯と同じ 3 通りを出す。帯が「WiFi接続中」なのに
+         * ここが「未接続」だと、どちらが本当か分からない。 */
+        const char *label;
+        if (cdk_wifi_is_connected()) {
+            label = "\033[32m接続\033[0m";
+        } else if (cdk_wifi_poll() == CDK_WIFI_CONNECTING) {
+            label = "\033[33m接続中\033[0m";
+        } else {
+            label = "未接続";
+        }
+        cdk_shell_printf(sh, "%s  ip=%s  直近の切断理由=%d\r\n", label, ip,
                          cdk_wifi_last_disconnect_reason());
         return 0;
     }
