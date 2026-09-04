@@ -317,6 +317,15 @@ static void route_key(void *user, const cdk_key_t *k)
         s_dirty = true;
     }
 
+    /* **パスワードを聞いている間は日本語入力を通さない。**
+     * かな入力のままだと `pass` が「ぱっｓ」になって送られるし、変換中の
+     * `▽` に打った字がそのまま出る（伏せ字にならない）。
+     * ここだけは SKK より先に判断する必要がある。 */
+    if (s_session == SESSION_SHELL && cdk_shell_asking(&s_shell)) {
+        cdk_shell_key(&s_shell, k);
+        return;
+    }
+
     /* 日本語入力はシェル / SSH の分岐より**前**に置く。ここを分岐の
      * 3 本目にすると「このキーは誰が受け取るのか」が追えなくなる。
      * 消費されなかったキーだけが下へ落ちる。 */
@@ -730,6 +739,33 @@ static char s_ssh_pass[80];
 static char s_ssh_arg_host[80];
 static char s_ssh_arg_user[48];
 
+/* その場で打ってもらったパスワードと、**それが誰のものか**。
+ *
+ * NVS には書かない。電源を切れば消える（DESIGN.md §8.5）。
+ *
+ * **相手を一緒に覚えるのが肝。** パスワードだけ持つと、次に別の機械へ
+ * 繋ぐときに黙って送ってしまう。`pick_password()` はこの 3 つが揃って
+ * 初めて使う。 */
+static char s_ask_host[80];
+static char s_ask_user[48];
+static char s_ask_pass[80];
+
+/* パスワードを聞いている間の相手。cb は誰へ繋ぐのかを覚えていないので
+ * ここに置く（聞いている最中に別の相手へは行けない。シェルは 1 本）。 */
+static char s_ask_target_host[80];
+static char s_ask_target_user[48];
+/* cdk_shell_ask は写さないので生かしておく。**いちばん長い相手が入る
+ * 大きさにする**（user 47 + `@` + host 79 + 「 のパスワード: 」21 = 148）。
+ * 切り詰めると宛先が途中で切れて、打ち間違いに気づく手だてが無くなる。 */
+static char s_ask_prompt[176];
+
+static void ssh_forget_asked(void)
+{
+    memset(s_ask_host, 0, sizeof(s_ask_host));
+    memset(s_ask_user, 0, sizeof(s_ask_user));
+    memset(s_ask_pass, 0, sizeof(s_ask_pass));
+}
+
 /* 設定値を NVS から読む。無ければ secrets.h（ビルド時に焼いた値）で補い、
  * その場で NVS に書いて次回以降は NVS だけで動くようにする。
  *
@@ -1002,23 +1038,41 @@ static void app_wifi_status(void)
      * 表示の体裁をコマンド側に閉じ込めておきたいのでフックだけ残す。 */
 }
 
+/* パスワードの出どころ。**どれを送ったかで、失敗したときの言い方も
+ * 次にすることも変わる**ので、呼び側に返す。 */
+typedef enum {
+    PASS_NONE = 0, /* 無い。鍵だけで行く */
+    PASS_NVS,      /* set ssh.pass で溜めたもの */
+    PASS_ASKED     /* その場で打ってもらったもの */
+} pass_src_t;
+
 /* 溜めたパスワードを使ってよい相手かを決める（DESIGN.md §8.3）。
  *
  * **`ssh` と `scp` で 1 か所。** 分けると、片方だけが知らない機械へ平文の
  * パスワードを送るようになる。送ってしまったものは取り消せない。
  *
- * 呼ぶ前に load_config() すること。key_only には「鍵だけで行く」が入る
- * （画面に出して、入れなかったときの誤診を防ぐため）。 */
+ * 呼ぶ前に load_config() すること。src には出どころが入る（PASS_NONE が
+ * 「鍵だけで行く」。画面に出して、入れなかったときの誤診を防ぐため）。 */
 static const char *pick_password(const char *user, const char *host,
-                                 bool *key_only)
+                                 pass_src_t *src)
 {
-    if (strcmp(user, s_ssh_user) == 0 && strcmp(host, s_ssh_host) == 0) {
-        *key_only = false;
+    /* **空は「無い」と同じ扱い。** 空を持っていることにすると「（鍵のみ）」
+     * が出ず、`set ssh.pass ""` の相手でパスワードを聞く道にも入らない。 */
+    if (s_ssh_pass[0] != '\0' && strcmp(user, s_ssh_user) == 0 &&
+        strcmp(host, s_ssh_host) == 0) {
+        *src = PASS_NVS;
         return s_ssh_pass;
+    }
+    /* その場で打ってもらったもの。**打った相手にしか送らない**のは
+     * NVS のものと同じ規則（相手ごと覚えてある）。 */
+    if (s_ask_pass[0] != '\0' && strcmp(user, s_ask_user) == 0 &&
+        strcmp(host, s_ask_host) == 0) {
+        *src = PASS_ASKED;
+        return s_ask_pass;
     }
     /* **NULL は渡せない。** libssh2_userauth_password が strlen() に
      * 素通しするので落ちる。 */
-    *key_only = true;
+    *src = PASS_NONE;
     return "";
 }
 
@@ -1038,16 +1092,23 @@ static cdk_ssh_login_t ssh_login(const char *user, const char *host,
     return l;
 }
 
+/* パスワードを聞く（下で定義。app_ssh_open と呼び合う）。 */
+static void ssh_ask_password(const char *user, const char *host);
+
 /* いまの相手へ繋ぐ。相手は s_ssh_arg_* があればそちら、無ければ NVS。
- * **繋ぎ直しもここを通る**ので、引数で入ったセッションは同じ相手へ戻る。 */
-static bool app_ssh_open(void)
+ * **繋ぎ直しもここを通る**ので、引数で入ったセッションは同じ相手へ戻る。
+ *
+ * interactive は「人がいま `ssh` と打った」。**繋ぎ直し（`cdk_retry`）では
+ * false。** 誰も見ていない画面でパスワードを聞いても答えは来ないし、
+ * 聞いている間シェルが伏せ字のまま止まる。 */
+static bool app_ssh_open(bool interactive)
 {
     load_config();
 
     const char *user = s_ssh_user;
     const char *host = s_ssh_host;
     const char *pass = s_ssh_pass;
-    bool        key_only = false;
+    pass_src_t  src = PASS_NONE;
 
     if (s_ssh_arg_host[0] != '\0') {
         user = s_ssh_arg_user;
@@ -1055,7 +1116,7 @@ static bool app_ssh_open(void)
     }
     /* 溜めたパスワードを送ってよい相手かを決める。判定は pick_password に
      * 1 つだけ置いてある（`scp` と共有する。**規則を 2 か所に持たない**）。 */
-    pass = pick_password(user, host, &key_only);
+    pass = pick_password(user, host, &src);
 
     if (host[0] == '\0' || user[0] == '\0') {
         term_printf("\033[31mssh   : 接続先が未設定 (set ssh.host / ssh.user)\033[0m\r\n");
@@ -1065,7 +1126,7 @@ static bool app_ssh_open(void)
     /* 鍵だけで行くことを言っておく。**黙って行くと、入れなかったときに
      * 「パスワードが違う」と思われる。** 桁が狭いので短く付ける。 */
     term_printf("ssh   : %s@%s に接続中%s...\r\n", user, host,
-                key_only ? "（鍵のみ）" : "");
+                (src == PASS_NONE) ? "（鍵のみ）" : "");
 
     /* PTY のサイズは端末の実値。最終ハードの 80x26 を決め打ちしない。 */
     const cdk_ssh_config_t cfg = {
@@ -1081,7 +1142,29 @@ static bool app_ssh_open(void)
          * 行くので、鍵が相手の authorized_keys に無い、がいちばん多い。**
          * ESP_ERR_NOT_ALLOWED と出されても次に何をすればいいか分からない。 */
         if (err == ESP_ERR_NOT_ALLOWED) {
-            term_printf("\033[31mssh   : 認証に失敗 (ssh key で確認)\033[0m\r\n");
+            /* **打ってもらったものが通らなかったら忘れる。**
+             * 残すと、次の `ssh` も同じ間違ったパスワードで黙って落ちて、
+             * 打ち直す道が無くなる（`pick_password` が持っている限り
+             * PASS_NONE にならないので、下の「聞く」にも入らない）。 */
+            if (src == PASS_ASKED) {
+                ssh_forget_asked();
+            }
+            if (src == PASS_NONE) {
+                /* 鍵が相手の authorized_keys に無い、がいちばん多い。
+                 * **ここで初めてパスワードを聞く。** 先に聞くと、鍵で
+                 * 入れる相手にまで平文の合言葉を打たせることになる。 */
+                if (interactive) {
+                    term_printf("\033[31mssh   : 鍵では入れませんでした\033[0m\r\n");
+                    ssh_ask_password(user, host);
+                    return false;
+                }
+                term_printf("\033[31mssh   : 認証に失敗 (ssh key で確認)\033[0m\r\n");
+            } else {
+                /* **パスワードを送ったのに `ssh key で確認` と出すと嘘になる。**
+                 * 直すところが鍵なのか合言葉なのか分からなくなる。 */
+                term_printf("\033[31mssh   : 認証に失敗"
+                            "（鍵もパスワードも通りません）\033[0m\r\n");
+            }
         } else if (err == ESP_ERR_NOT_FOUND) {
             /* 名前が引けないか、届かないか、22 番が閉じているか。
              * どれも「宛先を確かめる」で同じなのでまとめて出す。 */
@@ -1101,6 +1184,48 @@ static bool app_ssh_open(void)
     return true;
 }
 
+/* パスワードが返ってきた。**ここから繋ぎ直す。**
+ *
+ * cdk_shell_key の中から呼ばれるので、そのまま繋いでよい（`ssh` コマンドが
+ * 呼ばれるのと同じ場所・同じタスク）。 */
+static void ssh_password_entered(void *user, const char *answer)
+{
+    (void)user;
+    if (answer == NULL) {
+        term_printf("\033[33mssh   : やめました\033[0m\r\n");
+        return;
+    }
+    /* **相手と一緒に覚える。** 打った相手にしか送らない（§8.3 の規則を
+     * その場のパスワードにもそのまま当てる）。 */
+    strncpy(s_ask_user, s_ask_target_user, sizeof(s_ask_user) - 1);
+    s_ask_user[sizeof(s_ask_user) - 1] = '\0';
+    strncpy(s_ask_host, s_ask_target_host, sizeof(s_ask_host) - 1);
+    s_ask_host[sizeof(s_ask_host) - 1] = '\0';
+    strncpy(s_ask_pass, answer, sizeof(s_ask_pass) - 1);
+    s_ask_pass[sizeof(s_ask_pass) - 1] = '\0';
+
+    /* **1 回だけ。** ここで失敗しても app_ssh_open が s_ask_* を捨てるので、
+     * 聞き直しの無限ループにはならない（次に `ssh` と打てばまた聞く）。 */
+    (void)app_ssh_open(true);
+}
+
+static void ssh_ask_password(const char *user, const char *host)
+{
+    strncpy(s_ask_target_user, user, sizeof(s_ask_target_user) - 1);
+    s_ask_target_user[sizeof(s_ask_target_user) - 1] = '\0';
+    strncpy(s_ask_target_host, host, sizeof(s_ask_target_host) - 1);
+    s_ask_target_host[sizeof(s_ask_target_host) - 1] = '\0';
+
+    /* **誰のパスワードを聞かれているのかを出す。** 打ち間違えた宛先に
+     * 気づくのは、合言葉を打ってしまう前でなければ意味がない。 */
+    snprintf(s_ask_prompt, sizeof(s_ask_prompt), "%s@%s のパスワード: ", user,
+             host);
+    /* 入れ物は s_ask_pass。**入りきらないものは切り詰めずに断る**
+     * （cdk_shell_ask が「長すぎます」と出してやめる）。 */
+    cdk_shell_ask(&s_shell, s_ask_prompt, (int)sizeof(s_ask_pass) - 1,
+                  ssh_password_entered, NULL);
+}
+
 /* シェルからの入口。user/host が NULL なら NVS の設定へ戻す。 */
 static bool app_ssh_open_to(const char *user, const char *host)
 {
@@ -1111,18 +1236,25 @@ static bool app_ssh_open_to(const char *user, const char *host)
         s_ssh_arg_host[sizeof(s_ssh_arg_host) - 1] = '\0';
     } else {
         /* **引数なしの `ssh` だけが指定を消す。** 前に `ssh a@b` して
-         * いても引きずらない。 */
+         * いても引きずらない。その場で打ってもらったパスワードも一緒に
+         * 捨てる（宛先を戻したのに合言葉だけ残るのは分かりにくい）。 */
         s_ssh_arg_user[0] = '\0';
         s_ssh_arg_host[0] = '\0';
+        ssh_forget_asked();
     }
-    return app_ssh_open();
+    return app_ssh_open(true);
 }
 
 /* `scp`。**接続と認証だけ待って、転送はメインループに渡す。**
  *
- * 相手が NVS と同じなら溜めたパスワードを使い、違えば鍵だけで行く。
- * 判定は `pick_password()` 1 か所（`ssh` と共有。**規則を 2 か所に
- * 持たない**。DESIGN.md §8.3）。
+ * 相手が NVS と同じなら溜めたパスワードを使い、違えば鍵だけで行く
+ * （`ssh` でその相手のパスワードを打ってあれば、それも使う）。判定は
+ * `pick_password()` 1 か所（`ssh` と共有。**規則を 2 か所に持たない**。
+ * DESIGN.md §8.3）。
+ *
+ * **こちらではパスワードを聞かない。** 転送はメインループが刻むので、
+ * 途中でシェルに戻って伏せ字を出す道が無い。先に `ssh` で入っておけば
+ * その相手のぶんは覚えている。
  *
  * **`s_ssh_arg_*` を触らない。** あれは `ssh` の繋ぎ直し先なので、
  * `scp` の相手で上書きすると、あとで切れた SSH が別の機械へ繋ぎ直す。 */
@@ -1131,8 +1263,8 @@ static bool app_scp_start(bool upload, const char *local, const char *remote,
 {
     load_config();
 
-    bool        key_only = false;
-    const char *pass = pick_password(user, host, &key_only);
+    pass_src_t  src = PASS_NONE;
+    const char *pass = pick_password(user, host, &src);
 
     /* パスは **`cdk_wasm_path_resolve()`** を通す。`..` を畳んでから
      * `/sdcard` の下かを見る唯一の実装（`cdk_fscmds.c` の `resolve()` は
@@ -1149,7 +1281,7 @@ static bool app_scp_start(bool upload, const char *local, const char *remote,
     }
 
     term_printf("scp   : %s %s%s...\r\n", upload ? "送ります" : "取ります",
-                remote, key_only ? "（鍵のみ）" : "");
+                remote, (src == PASS_NONE) ? "（鍵のみ）" : "");
 
     char                  why[128] = {0};
     const cdk_ssh_login_t login = ssh_login(user, host, pass);
@@ -1174,6 +1306,16 @@ static void app_ssh_close(void)
 static bool app_ssh_is_open(void)
 {
     return cdk_ssh_is_open();
+}
+
+/* `ssh forget`。**人に貸す前に押せる口。**
+ *
+ * 電源を切れば消えるものだが、「消えているはず」を確かめる手段が無いのは
+ * 落ち着かない。NVS の `ssh.pass` はここでは消さない（`set` の持ち物で、
+ * 消したつもりが設定ごと消えていた、が起きるとつらい）。 */
+static void app_ssh_forget(void)
+{
+    ssh_forget_asked();
 }
 
 /* 繋ぎ直すのをやめて電波を止める。**外へ持ち出したときのための口。**
@@ -1403,6 +1545,7 @@ void app_main(void)
         .scp_start = app_scp_start,
         .ssh_close = app_ssh_close,
         .ssh_is_open = app_ssh_is_open,
+        .ssh_forget = app_ssh_forget,
         .skk_set_mode = app_skk_set_mode,
         .skk_get_mode = app_skk_get_mode,
         .skk_dict = app_skk_dict,
@@ -1585,7 +1728,11 @@ void app_main(void)
         if (cdk_retry_active(&s_retry) && cdk_retry_due(&s_retry, now_ms())) {
             term_printf("\033[33mssh   : 再接続 %u 回目...\033[0m\r\n",
                         (unsigned)cdk_retry_next_attempt(&s_retry));
-            if (cdk_wifi_is_connected() && app_ssh_open()) {
+            /* **繋ぎ直しでは聞かない**（interactive = false）。人が見て
+             * いるとは限らないし、聞いてもシェルが伏せ字のまま止まる。
+             * その場で打ってもらったパスワードは相手ごと覚えてあるので、
+             * 同じ相手への繋ぎ直しはそれで通る。 */
+            if (cdk_wifi_is_connected() && app_ssh_open(false)) {
                 cdk_retry_stop(&s_retry);
             } else {
                 cdk_retry_failed(&s_retry, now_ms());

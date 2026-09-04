@@ -98,11 +98,31 @@ static void redraw(cdk_shell_t *sh)
 
     emit(sh, "\r\033[K", 4);
     emit(sh, prompt, strlen(prompt));
-    emit(sh, sh->line, (size_t)sh->len);
 
-    /* カーソルを行頭に戻してから、プロンプト＋カーソル位置まで右へ動かす。 */
-    const int width = cdk_shell_visible_width(prompt, strlen(prompt)) +
-                      cdk_shell_visible_width(sh->line, (size_t)sh->cursor);
+    /* **伏せ字のときは行の中身を出さない。** ここが唯一の出口なので、
+     * cdk_shell_notify（WiFi の知らせ）が割り込んで描き直しても漏れない。
+     *
+     * 字数は出す。何文字打てたか分からないと打ち直しの判断ができない
+     * （`set` がパスワードの文字数だけ出すのと同じ考え）。 */
+    int stars = 0;
+    if (sh->asking) {
+        for (int i = 0; i < sh->len; i++) {
+            /* UTF-8 の続きのバイトは数えない。1 文字 = `*` 1 つ。 */
+            if (((unsigned char)sh->line[i] & 0xC0u) != 0x80u) {
+                emit(sh, "*", 1);
+                stars++;
+            }
+        }
+    } else {
+        emit(sh, sh->line, (size_t)sh->len);
+    }
+
+    /* カーソルを行頭に戻してから、プロンプト＋カーソル位置まで右へ動かす。
+     * 伏せ字のときカーソルは常に末尾なので、`*` の数がそのまま桁になる。 */
+    const int width =
+        cdk_shell_visible_width(prompt, strlen(prompt)) +
+        (sh->asking ? stars
+                    : cdk_shell_visible_width(sh->line, (size_t)sh->cursor));
 
     emit(sh, "\r", 1);
     if (width > 0) {
@@ -356,8 +376,29 @@ void cdk_shell_set_commands(cdk_shell_t *sh, const cdk_shell_cmd_t *cmds, size_t
     sh->cmd_user = cmd_user;
 }
 
+/* 伏せ字入力をやめて普通の行に戻す。**cb は呼ばない。**
+ *
+ * 打ちかけの中身も消す。SSH が落ちて enter_shell() まで戻ってきたときに
+ * 打ちかけのパスワードが残っていると、次のコマンド行に混ざる。 */
+static void ask_reset(cdk_shell_t *sh)
+{
+    if (!sh->asking) {
+        return;
+    }
+    sh->asking = false;
+    sh->prompt = sh->ask_saved_prompt;
+    sh->ask_cb = NULL;
+    sh->ask_user = NULL;
+    sh->ask_over = false;
+    memset(sh->line, 0, sizeof(sh->line));
+    clear_line(sh);
+}
+
 void cdk_shell_begin(cdk_shell_t *sh)
 {
+    /* **聞いている途中で持ち主が戻ってきたら、聞くのをやめる。**
+     * 残すと、SSH が切れて戻ったシェルが伏せ字のまま待ち続ける。 */
+    ask_reset(sh);
     sh->active = true;
     clear_line(sh);
     sh->hist_pos = -1;
@@ -366,7 +407,37 @@ void cdk_shell_begin(cdk_shell_t *sh)
 
 void cdk_shell_end(cdk_shell_t *sh)
 {
+    ask_reset(sh);
     sh->active = false;
+}
+
+void cdk_shell_ask(cdk_shell_t *sh, const char *prompt, int maxlen,
+                   cdk_shell_ask_fn cb, void *user)
+{
+    if (sh == NULL || cb == NULL || maxlen <= 0) {
+        return;
+    }
+    if (maxlen > CDK_SHELL_LINE_MAX - 1) {
+        maxlen = CDK_SHELL_LINE_MAX - 1;
+    }
+    /* 二重に聞かれたら前のは捨てる（前の cb は呼ばない）。 */
+    ask_reset(sh);
+
+    sh->ask_saved_prompt = sh->prompt;
+    sh->prompt = prompt;
+    sh->ask_max = maxlen;
+    sh->ask_over = false;
+    sh->ask_cb = cb;
+    sh->ask_user = user;
+    sh->asking = true;
+    sh->active = true;
+    clear_line(sh);
+    redraw(sh);
+}
+
+bool cdk_shell_asking(const cdk_shell_t *sh)
+{
+    return (sh != NULL) && sh->asking;
 }
 
 bool cdk_shell_split_userhost(const char *s, char *user, size_t ucap, char *host,
@@ -507,9 +578,106 @@ bool cdk_shell_active(const cdk_shell_t *sh)
     return sh->active;
 }
 
+/* 伏せ字入力のキー。**普通の行編集の表を通さない。**
+ *
+ * 履歴（Ctrl-P も ↑ も）と補完を通すと、打った合言葉が履歴や候補一覧に
+ * 出る。カーソル移動を許さないのは、`*` の下のどこに居るのかを見せられない
+ * から（見せるとその位置の字が何かを一つずつ当てられる）。
+ * 通すのは「打つ・1 文字消す・全部消す・出す・やめる」だけ。 */
+static void ask_key(cdk_shell_t *sh, const cdk_key_t *k)
+{
+    const bool ctrl = (k->mods & CDK_MOD_CTRL_BIT) != 0;
+    const bool cancel_key =
+        (k->keycode == CDK_K_ESC) ||
+        (ctrl && (k->codepoint == 'c' || k->codepoint == 'C'));
+
+    if (k->keycode == CDK_K_ENTER || cancel_key) {
+        /* cb と「長すぎた」は ask_reset で消えるので先に写す。 */
+        const cdk_shell_ask_fn cb = sh->ask_cb;
+        void                  *user = sh->ask_user;
+        const bool             over = sh->ask_over;
+        const int              cap = sh->ask_max;
+
+        char answer[CDK_SHELL_LINE_MAX];
+        memcpy(answer, sh->line, (size_t)sh->len);
+        answer[sh->len] = '\0';
+
+        cdk_shell_write(sh, (cancel_key && k->keycode != CDK_K_ESC) ? "^C\r\n"
+                                                                    : "\r\n");
+        ask_reset(sh); /* ここで sh->line が消える */
+
+        if (over && !cancel_key) { /* やめた人に長さの文句は要らない */
+            /* **切り詰めて送らない。** 途中まで合っている合言葉は
+             * 「打ったのに違うと言われる」になって原因が分からない。 */
+            cdk_shell_printf(sh, "\033[31m長すぎます（%d バイトまで）\033[0m\r\n",
+                             cap);
+        }
+        if (cb != NULL) {
+            /* やめたときは**打ちかけを渡さない**。空の Enter も「やめた」
+             * 扱い（port 側は空文字を「パスワード無し」と見るので、渡しても
+             * 認証を叩かずに落ちるだけになる）。 */
+            const bool give = !cancel_key && !over && answer[0] != '\0';
+            cb(user, give ? answer : NULL);
+        }
+        memset(answer, 0, sizeof(answer));
+
+        /* cb が SSH を張ったならシェルは止まっている（描き直さない）。 */
+        if (sh->active) {
+            redraw(sh);
+        }
+        return;
+    }
+
+    if (k->keycode == CDK_K_BS) {
+        if (sh->cursor > 0) {
+            delete_range(sh, prev_char_start(sh), sh->cursor);
+            redraw(sh);
+        }
+        return;
+    }
+
+    if (ctrl) {
+        if (k->codepoint == 'u') { /* 打ち直す */
+            clear_line(sh);
+            sh->ask_over = false;
+            redraw(sh);
+        }
+        return; /* 他の Ctrl 組み合わせは伏せ字では使わない */
+    }
+
+    if (k->keycode == CDK_K_SPACE) {
+        /* 空白も合言葉に入りうる。**黙って落とさない。** */
+        if (sh->len + 1 > sh->ask_max) {
+            sh->ask_over = true;
+            return;
+        }
+        insert_bytes(sh, " ", 1);
+        redraw(sh);
+        return;
+    }
+
+    if (k->keycode != CDK_K_NONE || k->codepoint == 0) {
+        return; /* Tab・矢印・Home などは無視 */
+    }
+
+    uint8_t      buf[4];
+    const size_t n = cdk_utf8_encode(k->codepoint, buf);
+    if (sh->len + (int)n > sh->ask_max) {
+        sh->ask_over = true;
+        return;
+    }
+    insert_bytes(sh, (const char *)buf, (int)n);
+    redraw(sh);
+}
+
 void cdk_shell_key(cdk_shell_t *sh, const cdk_key_t *k)
 {
     if (!sh->active || k == NULL) {
+        return;
+    }
+
+    if (sh->asking) {
+        ask_key(sh, k);
         return;
     }
 

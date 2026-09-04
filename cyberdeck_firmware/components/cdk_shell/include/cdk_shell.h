@@ -32,6 +32,10 @@ typedef void (*cdk_shell_out_fn)(void *user, const char *data, size_t len);
 /* 戻り値は終了コード。0 が成功。 */
 typedef int (*cdk_shell_cmd_fn)(int argc, char **argv, void *user);
 
+/* 伏せ字入力の答え。**やめたときは NULL**（空行もやめた扱い）。
+ * answer は呼び出しの間だけ有効で、戻ると消される。要るなら写すこと。 */
+typedef void (*cdk_shell_ask_fn)(void *user, const char *answer);
+
 typedef struct {
     const char      *name;
     const char      *usage; /* 1 行の説明。help が並べる */
@@ -58,6 +62,17 @@ typedef struct {
     const char *prompt;
     bool        active; /* false の間はキーを無視する（SSH に入っている等） */
     int         last_status;
+
+    /* ---- 伏せ字入力（cdk_shell_ask）----
+     *
+     * 行編集の器はコマンド行と同じものを使い回す。**2 つ持たない。**
+     * 分けると、伏せ字の側だけ UTF-8 の削除や桁数の数え方を間違える。 */
+    bool             asking;
+    const char      *ask_saved_prompt; /* 終わったら prompt をこれに戻す */
+    int              ask_max;          /* 受け取る側の入れ物に入るバイト数 */
+    bool             ask_over;         /* 入りきらない字が来た。切り詰めない */
+    cdk_shell_ask_fn ask_cb;
+    void            *ask_user;
 } cdk_shell_t;
 
 void cdk_shell_init(cdk_shell_t *sh, cdk_shell_out_fn out, void *out_user);
@@ -72,6 +87,28 @@ void cdk_shell_begin(cdk_shell_t *sh);
 void cdk_shell_end(cdk_shell_t *sh);
 
 bool cdk_shell_active(const cdk_shell_t *sh);
+
+/* パスワードを 1 行聞く。**画面には `*` しか出さない。**
+ *
+ * コマンドの中から呼んでよい（`ssh` が認証に落ちてから呼ぶ）。呼ぶと
+ * コマンド行の代わりに prompt が出て、Enter が来るまで cb は呼ばれない。
+ * cb は cdk_shell_key の中から呼ばれるので、**そこで SSH を張ってよい**
+ * （張れたら cdk_shell_end されるだけ）。
+ *
+ * prompt は呼び側が生かしておくこと（写さない。**プロンプトの寿命は
+ * 呼び側のもの**、という点は sh->prompt と同じ）。
+ *
+ * maxlen は受け取る側の入れ物に入るバイト数。**超えたら切り詰めずに
+ * やめる**（cb には NULL が行く）。切り詰めた合言葉を送っても通らないし、
+ * 「打ったのに違うと言われる」の原因が分からなくなる。
+ *
+ * 打った字は履歴に積まない。Ctrl-C / Esc / 空の Enter はやめる。 */
+void cdk_shell_ask(cdk_shell_t *sh, const char *prompt, int maxlen,
+                   cdk_shell_ask_fn cb, void *user);
+
+/* 伏せ字入力の途中か。**日本語入力を素通しさせないために要る**
+ * （かな入力のままパスワードを打つと変換されてしまう）。 */
+bool cdk_shell_asking(const cdk_shell_t *sh);
 
 /* キーを 1 つ食わせる。 */
 void cdk_shell_key(cdk_shell_t *sh, const cdk_key_t *key);

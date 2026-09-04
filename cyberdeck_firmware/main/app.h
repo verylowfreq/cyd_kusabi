@@ -30,6 +30,10 @@ typedef struct {
     void (*ssh_close)(void);
     bool (*ssh_is_open)(void);
 
+    /* その場で打ってもらったパスワードを捨てる（`ssh forget`）。
+     * NVS の `ssh.pass` は消さない（あれは `set` の持ち物）。 */
+    void (*ssh_forget)(void);
+
     /* SCP でファイルを 1 本やり取りする。走り出せたら true。
      *
      * local は SD 上のパス（**中で `cdk_wasm_path_resolve()` を通す**）。

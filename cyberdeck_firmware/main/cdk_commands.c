@@ -275,6 +275,14 @@ static int cmd_ssh(int argc, char **argv, void *user)
         return 0;
     }
 
+    /* その場で打ってもらったパスワードを捨てる。**人に貸す前に押せる口。**
+     * NVS の `ssh.pass` は消さない（消すなら `set ssh.pass ""`）。 */
+    if (argc >= 2 && strcmp(argv[1], "forget") == 0) {
+        ctx->ssh_forget();
+        cdk_shell_write(sh, "打ってもらったパスワードを忘れました\r\n");
+        return 0;
+    }
+
     /* 鍵の状態を見る。パスは cdk_ssh_key_path() が唯一の出どころなので、
      * ここで見る場所と実際に認証で使う場所は必ず一致する。 */
     if (argc >= 2 && strcmp(argv[1], "key") == 0) {
@@ -336,7 +344,7 @@ static int cmd_ssh(int argc, char **argv, void *user)
     const char *at_host = NULL;
     if (argc >= 2) {
         if (argc > 2) {
-            cdk_shell_write(sh, "使い方: ssh [user@host|close|key|keygen]\r\n");
+            cdk_shell_write(sh, "使い方: ssh [user@host|close|forget|key|keygen]\r\n");
             return 1;
         }
         if (!cdk_shell_split_userhost(argv[1], s_ssh_user_arg,
@@ -344,7 +352,7 @@ static int cmd_ssh(int argc, char **argv, void *user)
                                       sizeof(s_ssh_host_arg))) {
             cdk_shell_printf(sh, "\033[31m%s を user@host として読めません\033[0m\r\n",
                              argv[1]);
-            cdk_shell_write(sh, "使い方: ssh [user@host|close|key|keygen]\r\n");
+            cdk_shell_write(sh, "使い方: ssh [user@host|close|forget|key|keygen]\r\n");
             return 1;
         }
         at_user = s_ssh_user_arg;
@@ -635,7 +643,7 @@ const cdk_shell_cmd_t APP_COMMANDS[] = {
     {"free",    "ヒープの空き",                           cmd_free},
     {"set",     "設定の表示と変更 (set <key> <value>)",   cmd_set},
     {"wifi",    "WiFi (wifi connect|off)",                cmd_wifi},
-    {"ssh",     "SSH (user@host|close|key|keygen)",       cmd_ssh},
+    {"ssh",     "SSH (user@host|close|forget|key|keygen)",       cmd_ssh},
     {"scp",     "ファイル転送 (scp <手元> user@host:<パス>)", cmd_scp},
     {"gpio",    "GPIO の mode / set / get",               cmd_gpio},
     {"adc",     "ADC1 を読む (adc read <ch>)",            cmd_adc},

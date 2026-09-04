@@ -66,6 +66,24 @@ static const cdk_shell_cmd_t CMDS[] = {
     {"fail", "失敗する", cmd_fail},
 };
 
+/* 伏せ字入力の受け取り先 */
+static char ASK_ANSWER[256];
+static int  ASK_CALLS;
+static bool ASK_CANCELLED;
+static const char *PROMPT_BEFORE;
+
+static void on_ask(void *user, const char *answer)
+{
+    (void)user;
+    ASK_CALLS++;
+    ASK_CANCELLED = (answer == NULL);
+    ASK_ANSWER[0] = '\0';
+    if (answer != NULL) {
+        strncpy(ASK_ANSWER, answer, sizeof(ASK_ANSWER) - 1);
+        ASK_ANSWER[sizeof(ASK_ANSWER) - 1] = '\0';
+    }
+}
+
 static void setup(void)
 {
     OUTLEN = 0;
@@ -73,9 +91,22 @@ static void setup(void)
     LAST_CMD[0] = '\0';
     LAST_ARGC = 0;
     ECHO_CALLS = 0;
+    ASK_CALLS = 0;
+    ASK_CANCELLED = false;
+    ASK_ANSWER[0] = '\0';
     cdk_shell_init(&SH, on_out, NULL);
     cdk_shell_set_commands(&SH, CMDS, sizeof(CMDS) / sizeof(CMDS[0]), &SH);
     cdk_shell_begin(&SH);
+    PROMPT_BEFORE = SH.prompt;
+}
+
+/* 伏せ字入力を始める。**呼び出し回数は消さない**（1 つのケースで
+ * 何度も聞いて、そのたびに cb が来たかを数えるため）。 */
+static void ask_setup(int maxlen)
+{
+    OUTLEN = 0;
+    OUT[0] = '\0';
+    cdk_shell_ask(&SH, "pass: ", maxlen, on_ask, NULL);
 }
 
 static void key(uint16_t code, uint8_t mods, uint32_t cp)
@@ -590,6 +621,145 @@ int main(void)
         }
         T_CHECK(SH.len < CDK_SHELL_LINE_MAX);
         T_EQ_INT((int)strlen(SH.line), SH.len);
+    }
+
+    /* ---- 伏せ字入力（ssh のパスワード）---- */
+
+    T_CASE("伏せ字は画面に出ない。答えは Enter で渡る");
+    {
+        setup();
+        ask_setup(16);
+        type("hunter2");
+        /* 打った字がどこにも出ていないこと。**ここが本題。** */
+        T_CHECK(strstr(OUT, "hunter2") == NULL);
+        T_CHECK(strstr(OUT, "*******") != NULL);
+        T_CHECK(SH.asking);
+
+        key(CDK_K_ENTER, 0, 0);
+        T_EQ_INT(ASK_CALLS, 1);
+        T_EQ_STR(ASK_ANSWER, "hunter2");
+        T_CHECK(!ASK_CANCELLED);
+        T_CHECK(!SH.asking);
+        /* 渡したあとは器に残さない */
+        T_EQ_INT(SH.len, 0);
+        T_EQ_STR(SH.line, "");
+        /* 履歴にも積まない */
+        T_EQ_INT(SH.hist_count, 0);
+        /* プロンプトは元に戻る */
+        T_CHECK(SH.prompt == PROMPT_BEFORE);
+    }
+
+    T_CASE("伏せ字の行編集はバックスペースと Ctrl-U だけ");
+    {
+        setup();
+        ask_setup(16);
+        type("abc");
+        key(CDK_K_BS, 0, 0);
+        T_EQ_INT(SH.len, 2);
+
+        /* 履歴も補完もカーソル移動も効かない */
+        key(CDK_K_UP, 0, 0);
+        key(CDK_K_TAB, 0, 0);
+        key(CDK_K_LEFT, 0, 0);
+        key(CDK_K_HOME, 0, 0);
+        T_EQ_INT(SH.len, 2);
+        T_EQ_INT(SH.cursor, 2);
+
+        key(CDK_K_NONE, CDK_MOD_CTRL_BIT, 'u');
+        T_EQ_INT(SH.len, 0);
+        type("x y");
+        T_EQ_INT(SH.len, 3); /* 空白も合言葉のうち */
+
+        key(CDK_K_ENTER, 0, 0);
+        T_EQ_STR(ASK_ANSWER, "x y");
+    }
+
+    T_CASE("Ctrl-C・Esc・空の Enter はやめる");
+    {
+        setup();
+        ask_setup(16);
+        type("abc");
+        key(CDK_K_NONE, CDK_MOD_CTRL_BIT, 'c');
+        T_EQ_INT(ASK_CALLS, 1);
+        T_CHECK(ASK_CANCELLED);
+        T_CHECK(!SH.asking);
+
+        ask_setup(16);
+        type("abc");
+        key(CDK_K_ESC, 0, 0);
+        T_EQ_INT(ASK_CALLS, 2);
+        T_CHECK(ASK_CANCELLED);
+
+        ask_setup(16);
+        key(CDK_K_ENTER, 0, 0);
+        T_EQ_INT(ASK_CALLS, 3);
+        T_CHECK(ASK_CANCELLED);
+    }
+
+    T_CASE("長すぎるときは切り詰めずにやめる");
+    {
+        setup();
+        ask_setup(8); /* 8 バイトまで */
+        type("123456789012");
+        T_EQ_INT(SH.len, 8);
+        key(CDK_K_ENTER, 0, 0);
+        T_EQ_INT(ASK_CALLS, 1);
+        T_CHECK(ASK_CANCELLED); /* 切り詰めた 8 バイトは渡さない */
+        T_CHECK(strstr(OUT, "長すぎます") != NULL);
+
+        /* Ctrl-U で打ち直せば通る */
+        ask_setup(8);
+        type("123456789");
+        key(CDK_K_NONE, CDK_MOD_CTRL_BIT, 'u');
+        type("ok");
+        key(CDK_K_ENTER, 0, 0);
+        T_CHECK(!ASK_CANCELLED);
+        T_EQ_STR(ASK_ANSWER, "ok");
+    }
+
+    T_CASE("全角は 1 文字 1 つの伏せ字。消すのも 1 文字ずつ");
+    {
+        setup();
+        ask_setup(32);
+        key(CDK_K_NONE, 0, 0x3042); /* あ */
+        key(CDK_K_NONE, 0, 0x3044); /* い */
+        T_EQ_INT(SH.len, 6);
+        T_CHECK(strstr(OUT, "**") != NULL);
+        T_CHECK(strstr(OUT, "***") == NULL);
+        key(CDK_K_BS, 0, 0);
+        T_EQ_INT(SH.len, 3);
+    }
+
+    T_CASE("割り込みの知らせが伏せ字を漏らさない");
+    {
+        setup();
+        ask_setup(16);
+        type("hunter2");
+        OUTLEN = 0;
+        OUT[0] = '\0';
+        cdk_shell_notify(&SH, "wifi  : 接続 192.168.1.2");
+        T_CHECK(strstr(OUT, "hunter2") == NULL);
+        T_CHECK(strstr(OUT, "*******") != NULL);
+    }
+
+    T_CASE("シェルを止める・始めると聞くのをやめる");
+    {
+        setup();
+        ask_setup(16);
+        type("abc");
+        cdk_shell_end(&SH);
+        T_CHECK(!SH.asking);
+        T_EQ_INT(ASK_CALLS, 0); /* 黙ってやめる。cb は呼ばない */
+        T_EQ_INT(SH.len, 0);    /* 打ちかけは残さない */
+        T_CHECK(SH.prompt == PROMPT_BEFORE);
+
+        cdk_shell_begin(&SH);
+        ask_setup(16);
+        type("abc");
+        cdk_shell_begin(&SH); /* SSH が切れて戻ってきた、など */
+        T_CHECK(!SH.asking);
+        T_EQ_INT(ASK_CALLS, 0);
+        T_EQ_INT(SH.len, 0);
     }
 
     return t_report("test_shell");
