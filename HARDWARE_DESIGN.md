@@ -54,10 +54,10 @@ GPIO26〜32 は内蔵 flash 用でモジュールのピンに出ていない。
 | 21 | UART2 RTS | RTC |
 | 35–37 | 使用禁止 | octal PSRAM が使用 |
 | 38 | UART2 CTS | |
-| 39 | SD MISO | 外部 JTAG と同じピン（JTAG は使わない） |
-| 40 | SD MOSI | 同上 |
-| 41 | SD CS | 同上 |
-| 42 | SD SCLK | 同上 |
+| 39 | SD MOSI | 外部 JTAG と同じピン（JTAG は使わない） |
+| 40 | SD MISO | 同上 |
+| 41 | SD SCLK | 同上 |
+| 42 | SD CS | 同上 |
 | 43 | UART0 TX | **デバッグ: ログ + 書き込み**。モジュール既定 TXD0 |
 | 44 | UART0 RX | 同上。モジュール既定 RXD0 |
 | 45 | 空き | ストラッピング |

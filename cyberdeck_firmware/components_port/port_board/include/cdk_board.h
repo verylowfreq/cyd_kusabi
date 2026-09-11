@@ -107,10 +107,10 @@
 
 /* ---- microSD (SPI3。LCD とは別バス) ---- */
 #define CDK_BOARD_SD_SPI_HOST SPI3_HOST
-#define CDK_BOARD_SD_MISO    39
-#define CDK_BOARD_SD_MOSI    40
-#define CDK_BOARD_SD_CS      41
-#define CDK_BOARD_SD_SCLK    42
+#define CDK_BOARD_SD_MOSI    39
+#define CDK_BOARD_SD_MISO    40
+#define CDK_BOARD_SD_SCLK    41
+#define CDK_BOARD_SD_CS      42
 
 /* ---- I2C（Grove） ---- */
 #define CDK_BOARD_I2C_SDA 17
