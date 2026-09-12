@@ -562,6 +562,77 @@ cdk_scp_parse_t cdk_shell_scp_parse(const char *a, const char *b,
     return CDK_SCP_OK;
 }
 
+/* ---- uart の引数 ---- */
+
+/* 10 進の数だけを読む。`atoi` は "9600x" を 9600 として通してしまい、
+ * 打ち間違いが黙って別の速度になる。溢れも見る。 */
+static bool parse_baud(const char *s, int *out)
+{
+    if (s == NULL || s[0] == '\0') return false;
+    long v = 0;
+    for (const char *p = s; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9') return false;
+        v = v * 10 + (*p - '0');
+        if (v > 3000000) return false; /* 上限を超えたら即やめる */
+    }
+    if (v < 300) return false;
+    *out = (int)v;
+    return true;
+}
+
+bool cdk_shell_uart_parse(int argc, char **argv, cdk_uart_args_t *out,
+                          const char **why)
+{
+    const char *reason = NULL;
+    cdk_uart_args_t tmp;
+    tmp.baud = 115200;
+    tmp.flow = false;
+    bool got_baud = false;
+
+    if (out == NULL || argv == NULL) {
+        reason = "引数がありません";
+        goto fail;
+    }
+
+    /* argv[0] はコマンド名。1 から見る。 */
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (a == NULL) {
+            reason = "引数がありません";
+            goto fail;
+        }
+        if (strcmp(a, "--flow") == 0 || strcmp(a, "-f") == 0) {
+            tmp.flow = true;
+            continue;
+        }
+        if (strcmp(a, "--noflow") == 0) {
+            tmp.flow = false;
+            continue;
+        }
+        if (a[0] == '-') {
+            reason = "知らない指定です";
+            goto fail;
+        }
+        if (got_baud) {
+            reason = "速度は 1 つだけです";
+            goto fail;
+        }
+        if (!parse_baud(a, &tmp.baud)) {
+            reason = "速度は 300〜3000000 の数で指定してください";
+            goto fail;
+        }
+        got_baud = true;
+    }
+
+    *out = tmp;
+    if (why != NULL) *why = NULL;
+    return true;
+
+fail:
+    if (why != NULL) *why = reason;
+    return false;
+}
+
 void cdk_shell_notify(cdk_shell_t *sh, const char *s)
 {
     if (!sh->active || s == NULL) {

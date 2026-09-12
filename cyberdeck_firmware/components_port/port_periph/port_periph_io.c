@@ -235,7 +235,14 @@ static bool s_uart_open;
 
 bool cdk_uart_is_open(void) { return s_uart_open; }
 
-esp_err_t cdk_uart_open(int tx, int rx, int baud)
+/* RX FIFO がここまで溜まったら RTS を下げて相手を待たせる。
+ *
+ * **UART_HW_FIFO_LEN (128) 以上にすると uart_param_config が
+ * ESP_ERR_INVALID_ARG を返す。** 溜めてから止めるほど取りこぼしが
+ * 減るので、上限の少し下に置く。 */
+#define UART_RX_FLOW_THRESH 122
+
+esp_err_t cdk_uart_open(int tx, int rx, int baud, bool flow, int rts, int cts)
 {
     if (s_uart_open) return ESP_ERR_INVALID_STATE;
     if (baud < 300 || baud > 3000000) return ESP_ERR_INVALID_ARG;
@@ -246,13 +253,25 @@ esp_err_t cdk_uart_open(int tx, int rx, int baud)
         ESP_LOGE(TAG, "予約ピンです: %s", why ? why : "?");
         return ESP_ERR_INVALID_ARG;
     }
+    /* **フロー制御を入れるときだけ rts/cts を見る。** 使わないなら
+     * この 2 本は空きピンなので、予約の判定も掴むこともしない。 */
+    if (flow) {
+        if (rts == cts || rts == tx || rts == rx || cts == tx || cts == rx) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        if (cdk_gpio_is_reserved(rts, &why) || cdk_gpio_is_reserved(cts, &why)) {
+            ESP_LOGE(TAG, "予約ピンです: %s", why ? why : "?");
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
 
     const uart_config_t cfg = {
         .baud_rate = baud,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .flow_ctrl = flow ? UART_HW_FLOWCTRL_CTS_RTS : UART_HW_FLOWCTRL_DISABLE,
+        .rx_flow_ctrl_thresh = UART_RX_FLOW_THRESH,
         .source_clk = UART_SCLK_DEFAULT,
     };
     esp_err_t err = uart_driver_install(EXT_UART, UART_RX_BUF, UART_TX_BUF, 0, NULL, 0);
@@ -260,7 +279,9 @@ esp_err_t cdk_uart_open(int tx, int rx, int baud)
 
     err = uart_param_config(EXT_UART, &cfg);
     if (err == ESP_OK) {
-        err = uart_set_pin(EXT_UART, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        err = uart_set_pin(EXT_UART, tx, rx,
+                           flow ? rts : UART_PIN_NO_CHANGE,
+                           flow ? cts : UART_PIN_NO_CHANGE);
     }
     if (err != ESP_OK) {
         (void)uart_driver_delete(EXT_UART);
@@ -268,13 +289,29 @@ esp_err_t cdk_uart_open(int tx, int rx, int baud)
     }
 
     s_uart_open = true;
-    ESP_LOGI(TAG, "UART%d 開始 TX=G%d RX=G%d %d bps", EXT_UART, tx, rx, baud);
+    if (flow) {
+        ESP_LOGI(TAG, "UART%d 開始 TX=G%d RX=G%d RTS=G%d CTS=G%d %d bps",
+                 EXT_UART, tx, rx, rts, cts, baud);
+    } else {
+        ESP_LOGI(TAG, "UART%d 開始 TX=G%d RX=G%d %d bps", EXT_UART, tx, rx, baud);
+    }
     return ESP_OK;
 }
 
 int cdk_uart_write(const void *p, int n)
 {
     if (!s_uart_open || p == NULL || n <= 0) return -1;
+
+    /* **入る分だけ確かめてから書く。** uart_write_bytes は TX リングが
+     * 埋まると portMAX_DELAY で待つ。フロー制御を入れて相手の CTS が
+     * 下がったままだと TX FIFO が永久に捌けないので、ここで待つと
+     * 呼び出し元（メインループ）ごと止まり、画面もキーも制御チャネルも
+     * 死ぬ。外から様子を見る手段まで無くなるのが一番困る。
+     * 詰まっていたら捨てて -1 を返し、上で人に見える形にする。 */
+    size_t freesz = 0;
+    if (uart_get_tx_buffer_free_size(EXT_UART, &freesz) != ESP_OK) return -1;
+    if (freesz < (size_t)n) return -1;
+
     return uart_write_bytes(EXT_UART, p, (size_t)n);
 }
 

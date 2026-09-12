@@ -154,5 +154,57 @@ int main(void)
         T_CHECK(strlen(tiny) < sizeof(tiny));
     }
 
+    T_CASE("UART セッションを帯に出す");
+    {
+        cdk_status_t st;
+        memset(&st, 0, sizeof(st));
+        st.uart_baud = 115200;
+        cdk_status_format(&st, 80, BUF, sizeof(BUF));
+        T_CHECK(strstr(BUF, "UART 115200") != NULL);
+        /* フロー制御なしなら F を出さない。「WiFi」に F が入っているので
+         * 単独の "F" では数えられない。 */
+        T_CHECK(strstr(BUF, "UART 115200 F") == NULL);
+
+        st.uart_flow = true;
+        cdk_status_format(&st, 80, BUF, sizeof(BUF));
+        T_CHECK(strstr(BUF, "UART 115200 F") != NULL);
+
+        /* 0 なら出さない（開いていないのに UART 0 と出すと嘘になる） */
+        st.uart_baud = 0;
+        cdk_status_format(&st, 80, BUF, sizeof(BUF));
+        T_CHECK(strstr(BUF, "UART") == NULL);
+    }
+
+    T_CASE("40 桁でも UART とかなが両方残る");
+    {
+        /* `UART 115200 F` は 13 桁で、SSH の 4 桁より大幅に長い。
+         * 2 倍表示（40 桁）で後ろの項目が落ちないことを見る。
+         * かなの状態が消えると、日本語が出るのか分からなくなる。 */
+        cdk_status_t st;
+        memset(&st, 0, sizeof(st));
+        st.wifi_up = true;
+        st.ip = "192.168.1.97";
+        st.uart_baud = 115200;
+        st.uart_flow = true;
+        st.ime = "かな";
+        cdk_status_format(&st, 40, BUF, sizeof(BUF));
+        T_CHECK(strstr(BUF, "UART 115200 F") != NULL);
+        T_CHECK(strstr(BUF, "かな") != NULL);
+        T_CHECK(cdk_status_width(BUF) <= 40);
+    }
+
+    T_CASE("UART と SSH は同じ枠。SSH を優先する");
+    {
+        /* セッションは排他なので両方立つことは無いが、立ったとしても
+         * 枠を 2 つ使って後ろの項目を落とさないこと。 */
+        cdk_status_t st;
+        memset(&st, 0, sizeof(st));
+        st.ssh_up = true;
+        st.uart_baud = 9600;
+        cdk_status_format(&st, 80, BUF, sizeof(BUF));
+        T_CHECK(strstr(BUF, "SSH") != NULL);
+        T_CHECK(strstr(BUF, "UART") == NULL);
+    }
+
     return t_report("test_status");
 }

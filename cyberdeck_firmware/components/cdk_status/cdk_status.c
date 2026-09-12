@@ -82,8 +82,13 @@ size_t cdk_status_format(const cdk_status_t *st, int cols, char *out, size_t cap
     }
     (void)push(out, cap, &len, &w, cols, seg);
 
+    /* **SSH と UART は同じ枠。** セッションは排他なので同時には立たない。 */
     if (st->ssh_up) {
         (void)push(out, cap, &len, &w, cols, " SSH");
+    } else if (st->uart_baud > 0) {
+        snprintf(seg, sizeof(seg), " UART %d%s", st->uart_baud,
+                 st->uart_flow ? " F" : "");
+        (void)push(out, cap, &len, &w, cols, seg);
     }
 
     if (st->ime != NULL && st->ime[0] != '\0') {

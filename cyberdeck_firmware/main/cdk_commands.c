@@ -632,6 +632,51 @@ static int cmd_i2c(int argc, char **argv, void *user)
     return 0;
 }
 
+/* 外部 UART (UART2) の端末。D-sub / Grove に挿した機器と直接話す。
+ *
+ * ピンは基板の物で固定（cdk_board.h）。開けるのは main.c の
+ * `app_uart_open` で、ここは引数を解いて結果を整形するだけ。 */
+static int cmd_uart(int argc, char **argv, void *user)
+{
+    const app_ctx_t *ctx = ctx_of(user);
+    cdk_shell_t *sh = ctx->sh;
+
+    if (ctx->uart_open == NULL) {
+        cdk_shell_write(sh, "\033[31mこの基板には外に出せる UART が"
+                            "ありません\033[0m\r\n");
+        return 1;
+    }
+
+    cdk_uart_args_t a;
+    const char *why = NULL;
+    if (!cdk_shell_uart_parse(argc, argv, &a, &why)) {
+        if (why != NULL) {
+            cdk_shell_printf(sh, "\033[31m%s\033[0m\r\n", why);
+        }
+        cdk_shell_write(sh,
+                        "使い方: uart [速度] [--flow]\r\n"
+                        "  速度は既定 115200。8N1 固定。\r\n"
+                        "  --flow (-f) で RTS/CTS のフロー制御を入れます。\r\n"
+                        "  ピンは基板の D-sub / Grove で固定です。\r\n");
+        return 1;
+    }
+
+    if (!ctx->uart_open(a.baud, a.flow, &why)) {
+        cdk_shell_printf(sh, "\033[31m開けません: %s\033[0m\r\n",
+                         why ? why : "?");
+        return 1;
+    }
+
+    /* **フロー制御の状態を必ず出す。** 入れたまま相手の CTS が浮いていると
+     * 送信が詰まるが、それはエラーにならないので、ここと帯の表示だけが
+     * 手掛かりになる。 */
+    cdk_shell_printf(sh,
+                     "\033[36m[UART2 %d 8N1 flow:%s]\033[0m "
+                     "\033[90mCtrl-] q で戻る\033[0m\r\n",
+                     a.baud, a.flow ? "ON" : "OFF");
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 
 const cdk_shell_cmd_t APP_COMMANDS[] = {
@@ -648,6 +693,7 @@ const cdk_shell_cmd_t APP_COMMANDS[] = {
     {"gpio",    "GPIO の mode / set / get",               cmd_gpio},
     {"adc",     "ADC1 を読む (adc read <ch>)",            cmd_adc},
     {"i2c",     "I2C を走査 (i2c scan <sda> <scl>)",      cmd_i2c},
+    {"uart",    "シリアル端末 (uart [速度] [--flow])",    cmd_uart},
     {"hostkey", "SSH ホスト鍵の検証状態 (hostkey forget)", cmd_hostkey},
     {"reboot",  "再起動",                                 cmd_reboot},
 };

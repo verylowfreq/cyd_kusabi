@@ -56,6 +56,15 @@ typedef struct {
      * return した時点で無効になるため）。 */
     bool (*wasm_open)(const char *path, int argc, char **argv);
 
+    /* 外部 UART (UART2) の端末を開いてセッションを切り替える。
+     *
+     * **ピンは基板の物で固定**（cdk_board.h の CDK_BOARD_EXT_UART_*）。
+     * flow を立てると RTS/CTS も掴む。開けなかったら false で、
+     * 理由は why に入る（NULL 可。指す先は静的な文字列）。
+     *
+     * この基板に外部 UART が無い場合は常に false。 */
+    bool (*uart_open)(int baud, bool flow, const char **why);
+
     void (*reboot)(void);
 } app_ctx_t;
 

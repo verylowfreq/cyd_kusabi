@@ -303,7 +303,11 @@ static int h_uart_open(void *u, int tx, int rx, int baud)
 {
     (void)u;
     if (cdk_uart_is_open()) return CDK_E_NOMEM;
-    const esp_err_t e = cdk_uart_open(tx, rx, baud);
+    /* **ゲストにフロー制御は出していない。** ABI (`uart_open` = "i(iii)") を
+     * 変えると C / Rust の SDK まで揃えて直す必要があり、
+     * abi_names_match の ctest が 3 面で照合している。
+     * RTS/CTS が要るのはシェルの `uart` なので、そちらだけに出す。 */
+    const esp_err_t e = cdk_uart_open(tx, rx, baud, false, -1, -1);
     if (e != ESP_OK) return map_err(e);
     return 0; /* 実ハンドルは 1 つだけ。cdk_wasm が添字に置き換える */
 }

@@ -22,6 +22,7 @@
 #include "cdk_keys.h"
 #include "cdk_link.h"
 #include "cdk_net.h"
+#include "cdk_periph.h" /* cdk_uart_* — 外部 UART の端末 */
 #include "cdk_proto.h"
 #include "cdk_screen.h"
 #include "cdk_shell.h"
@@ -141,10 +142,31 @@ typedef enum {
     SESSION_SSH,
     SESSION_EDIT,
     SESSION_WASM,
-    SESSION_SCP
+    SESSION_SCP,
+#if CDK_BOARD_HAS_EXT_UART
+    SESSION_UART
+#endif
 } session_t;
 
 static session_t s_session = SESSION_SHELL;
+
+#if CDK_BOARD_HAS_EXT_UART
+/* いま開いている UART の設定。帯に出すので main が持つ。 */
+static int  s_uart_baud;
+static bool s_uart_flow;
+
+/* `Ctrl-]` を受けた直後か。次の 1 打で抜けるかどうかが決まる。
+ *
+ * **前置キーにしたのは、`Ctrl-]` そのものを相手に送る道を残すため**
+ * （DESIGN.md の「見送ったもの」がここを決めろと書いていた）。
+ * `Ctrl-] q` で抜け、それ以外は 0x1D を送ってからそのキーを送る。 */
+static bool s_uart_prefix;
+
+/* 詰まっていることを既に知らせたか。**詰まるたびに出すと画面が埋まる。**
+ * 1 バイトずつ弾かれると貼り付けの長さぶん行が出て、
+ * 「詰まりを見せる」どころか本文が流れて消える。 */
+static bool s_uart_stalled;
+#endif
 
 /* 端末へ書く。実体はこの下の方にある。 */
 static void term_printf(const char *fmt, ...);
@@ -234,6 +256,87 @@ static void leave_scp(void)
     enter_shell();
 }
 
+#if CDK_BOARD_HAS_EXT_UART
+/* 外部 UART の端末。**wasm / scp と同じく、切り替えて即 return する。**
+ * 汲むのはメインループで、ここは画面とキーの持ち主を移すだけ。 */
+static void enter_uart(void)
+{
+    s_session = SESSION_UART;
+    s_uart_prefix = false;
+    /* **詰まりの通知を出し直せるようにする。** 詰まったまま抜けて
+     * 開き直したとき、立ったままだと「送信が詰まっています」が
+     * 二度と出ない（通知は書き込みが通ったときにしか降りない）。
+     * 配線を直そうとしている最中こそ出てほしい。 */
+    s_uart_stalled = false;
+    drop_preedit();
+    cdk_shell_end(&s_shell);
+    s_dirty = true;
+}
+
+static void leave_uart(void)
+{
+    /* **必ず閉じる。** 閉じ忘れると UART2 が掴まれたままになり、
+     * 以後 `wasm run uartecho` が開けなくなる（貸し出し口は 1 本きり）。 */
+    (void)cdk_uart_close();
+    s_uart_baud = 0;
+    s_uart_flow = false;
+    s_uart_prefix = false;
+    /* **知らせるのは enter_shell の前。** 逆にするとプロンプトを出した
+     * あとに行が挟まって、打ちかけの行が上へ流れる（ssh / scp と同じ順）。 */
+    term_printf("\r\n\033[90muart  : 戻りました\033[0m\r\n");
+    enter_shell();
+}
+
+/* `uart` コマンドから頼まれて開く。`app_ssh_open` と同じ形。
+ *
+ * **開けるのも閉じるのもここ。** コマンド側に開けさせると、閉じるのが
+ * main.c で持ち主が 2 つに割れるし、帯に出す速度とフローの値も要る。 */
+static bool app_uart_open(int baud, bool flow, const char **why)
+{
+    /* wasm アプリが掴んでいたら断る。外に出せる UART は 1 本きり。 */
+    if (cdk_uart_is_open()) {
+        if (why != NULL) *why = "UART2 は使用中です（アプリが開いています）";
+        return false;
+    }
+    const esp_err_t err = cdk_uart_open(CDK_BOARD_EXT_UART_TX,
+                                        CDK_BOARD_EXT_UART_RX, baud, flow,
+                                        CDK_BOARD_EXT_UART_RTS,
+                                        CDK_BOARD_EXT_UART_CTS);
+    if (err != ESP_OK) {
+        if (why != NULL) *why = esp_err_to_name(err);
+        return false;
+    }
+    s_uart_baud = baud;
+    s_uart_flow = flow;
+    enter_uart();
+    return true;
+}
+
+/* 相手へ送る。**詰まったら捨てて、そのことを人に見せる。**
+ *
+ * 詰まる理由は 2 つあって、どちらかは中から見分けられない:
+ *  - フロー制御を入れて相手の CTS が浮いている（永久に捌けない）
+ *  - 単に速度が足りない。制御チャネルは 921600 で来るので、
+ *    `uart 9600` に 1KB 以上貼り付けると TX リング (1KB) が溢れる
+ * どちらにしても黙って消えると「打っても何も起きない」になるので、
+ * 原因を決めつけない文言で知らせる。 */
+static void uart_send(const uint8_t *p, size_t n)
+{
+    if (n == 0) return;
+    if (cdk_uart_write(p, (int)n) < 0) {
+        if (!s_uart_stalled) { /* 詰まりに入った 1 回だけ知らせる */
+            s_uart_stalled = true;
+            term_printf("\r\n\033[33muart  : 送信が詰まっています"
+                        "（相手が受け取っていないか、速度が"
+                        "追いついていません）\033[0m\r\n");
+            s_dirty = true;
+        }
+        return;
+    }
+    s_uart_stalled = false; /* 通ったので、次の詰まりはまた知らせる */
+}
+#endif /* CDK_BOARD_HAS_EXT_UART */
+
 static void leave_edit(void)
 {
     s_mode_edit = cdk_skk_get_mode(&s_skk);
@@ -250,6 +353,15 @@ static void skk_commit(void *ctx, const char *utf8, size_t len)
         (void)cdk_ssh_write((const uint8_t *)utf8, len);
         return;
     }
+#if CDK_BOARD_HAS_EXT_UART
+    /* **ここを忘れると確定した日本語がシェルへ漏れる。**
+     * 打った本人は相手に送ったつもりなので、戻ったときに
+     * コマンド行に化けて残るのが一番分かりにくい。 */
+    if (s_session == SESSION_UART) {
+        uart_send((const uint8_t *)utf8, len);
+        return;
+    }
+#endif
     if (s_session == SESSION_EDIT) {
         cdk_edit_insert(&s_edit, utf8, len);
         return;
@@ -326,6 +438,32 @@ static void route_key(void *user, const cdk_key_t *k)
         return;
     }
 
+#if CDK_BOARD_HAS_EXT_UART
+    /* **抜けるキーの判定は SKK より前。**
+     *
+     * かなモードの SKK は素の `q` を食う（カタカナ切り替え）。ここを
+     * SKK の後ろに置くと、日本語を打つためにかなにした時点で `Ctrl-] q`
+     * が届かず、**画面を占有したまま抜ける手段が無くなる**。 */
+    if (s_session == SESSION_UART) {
+        if (!s_uart_prefix) {
+            if ((k->mods & CDK_MOD_CTRL_BIT) && k->codepoint == ']') {
+                s_uart_prefix = true;
+                return;
+            }
+        } else {
+            s_uart_prefix = false;
+            if (k->codepoint == 'q' || k->codepoint == 'Q') {
+                leave_uart();
+                return;
+            }
+            /* 抜けないなら `Ctrl-]` そのものを相手へ送り、**この打鍵は
+             * 下へ落とす**（2 打目は SKK を通す。日本語がそのまま打てる）。 */
+            static const uint8_t gs = 0x1D;
+            uart_send(&gs, 1);
+        }
+    }
+#endif
+
     /* 日本語入力はシェル / SSH の分岐より**前**に置く。ここを分岐の
      * 3 本目にすると「このキーは誰が受け取るのか」が追えなくなる。
      * 消費されなかったキーだけが下へ落ちる。 */
@@ -394,6 +532,18 @@ static void route_key(void *user, const cdk_key_t *k)
         }
         return;
     }
+
+#if CDK_BOARD_HAS_EXT_UART
+    if (s_session == SESSION_UART) {
+        /* **Ctrl-C は横取りしない**（wasm / scp とは逆）。相手の CLI を
+         * 止める合図なので、こちらで食うと相手を止められなくなる。
+         * 抜けるのは `Ctrl-] q` だけ。 */
+        uint8_t out[16];
+        const size_t n = cdk_keys_encode(k, s_term.app_cursor_keys, out, sizeof(out));
+        uart_send(out, n);
+        return;
+    }
+#endif
     cdk_shell_key(&s_shell, k);
 }
 
@@ -406,6 +556,43 @@ static void route_bytes(const uint8_t *data, size_t len)
         (void)cdk_ssh_write(data, len);
         return;
     }
+#if CDK_BOARD_HAS_EXT_UART
+    /* **前置キーの状態機械をここにも置く。** scp の Ctrl-C と同じ理由で、
+     * 入力の出どころが 2 つあるため。`cdk.py key ctrl+]` は MSG_KEY で
+     * route_key に来るが、**`cdk.py type` は MSG_TEXT でここに来る**ので、
+     * 片方だけに入れると貼り付けた 0x1D の扱いが食い違う。
+     * 抜けるのは 0x1D のあとの `q`。それ以外は 0x1D ごと相手へ流す。 */
+    if (s_session == SESSION_UART) {
+        size_t i = 0;
+        while (i < len) {
+            if (s_uart_prefix) {
+                const uint8_t c = data[i++];
+                s_uart_prefix = false;
+                if (c == 'q' || c == 'Q') {
+                    leave_uart();
+                    /* **残りは捨てる。** シェルへ戻ったあとのプロンプトに
+                     * 流し込むと、打った覚えのない行が出来る。 */
+                    return;
+                }
+                const uint8_t esc[2] = {0x1D, c};
+                uart_send(esc, 2);
+                continue;
+            }
+            /* **0x1D までをまとめて送る。** 1 バイトずつ渡すと、詰まった
+             * ときに弾かれる回数が貼り付けの長さぶんになる。 */
+            size_t run = 0;
+            while (i + run < len && data[i + run] != 0x1D) run++;
+            if (run > 0) {
+                uart_send(data + i, run);
+                i += run;
+                continue;
+            }
+            i++; /* data[i] == 0x1D */
+            s_uart_prefix = true;
+        }
+        return;
+    }
+#endif
     /* ユーザーアプリも SSH と同じ扱い。こちらでエスケープを解かない。
      * ただし Ctrl-C だけは横取りする（route_key と揃える）。 */
     if (s_session == SESSION_WASM) {
@@ -459,6 +646,19 @@ static void on_term_reply(void *user, const uint8_t *data, size_t len)
     if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
         (void)cdk_ssh_write(data, len);
     }
+#if CDK_BOARD_HAS_EXT_UART
+    /* UART の相手も CLI なので同じ。返さないと `CSI 6n` を出す相手が
+     * 永久に待つ。
+     *
+     * **ここだけは `uart_send` を通さない。** この関数は
+     * `cdk_term_feed` の途中（エスケープ列を解いている最中）から呼ばれる。
+     * `uart_send` は詰まったときに `term_printf` で知らせ、それが
+     * `cdk_term_feed` を呼ぶので、解きかけの状態で再入して壊れる。
+     * 応答を 1 つ落とすのは構わないが、パーサを壊すのは困る。 */
+    if (s_session == SESSION_UART) {
+        (void)cdk_uart_write(data, (int)len);
+    }
+#endif
     /* シェルは問い合わせないので、それ以外では捨てる。 */
 }
 
@@ -609,6 +809,14 @@ static void draw_status(bool force)
     st.ime = cdk_skk_mode_label(&s_skk);
     st.kbd = cdk_usbhid_connected();
     st.ssh_up = cdk_ssh_is_open();
+#if CDK_BOARD_HAS_EXT_UART
+    /* UART セッションの間だけ出す。開いていても別のセッションに居るなら
+     * 出さない（帯は「いま何を触っているか」を出す場所）。 */
+    if (s_session == SESSION_UART) {
+        st.uart_baud = s_uart_baud;
+        st.uart_flow = s_uart_flow;
+    }
+#endif
     st.scroll_back = cdk_term_view_offset(&s_term);
 
     char line[160];
@@ -1551,6 +1759,12 @@ void app_main(void)
         .skk_dict = app_skk_dict,
         .edit_open = app_edit_open,
         .wasm_open = app_wasm_open,
+#if CDK_BOARD_HAS_EXT_UART
+        .uart_open = app_uart_open,
+#else
+        /* この基板に外部 UART は無い。コマンド側が NULL を見て断る。 */
+        .uart_open = NULL,
+#endif
         .reboot = app_reboot,
     };
     /* コマンド表を繋いで渡す。help は登録された表をそのまま見る。
@@ -1700,6 +1914,23 @@ void app_main(void)
                 }
             }
         }
+
+#if CDK_BOARD_HAS_EXT_UART
+        /* 外部 UART の受信をそのまま端末へ。SSH と同じで専用タスクは
+         * 作らない。`cdk_uart_read` は元から待たない（timeout 0）。 */
+        if (s_session == SESSION_UART) {
+            uint8_t rx[512];
+            for (int i = 0; i < 8; i++) { /* 1 周で汲みすぎない */
+                const int n = cdk_uart_read(rx, sizeof(rx));
+                if (n > 0) {
+                    cdk_term_feed(&s_term, rx, (size_t)n);
+                    s_dirty = true;
+                    continue;
+                }
+                break;
+            }
+        }
+#endif
 
         /* ユーザーアプリ。**別タスクで走っているので、ここは汲むだけ。**
          * 端末とキャンバスを触るのはメインループだけ、という約束を守る。 */

@@ -189,6 +189,27 @@ typedef struct {
 cdk_scp_parse_t cdk_shell_scp_parse(const char *a, const char *b,
                                     cdk_scp_args_t *out);
 
+/* ---- uart の引数 ---- */
+
+typedef struct {
+    int  baud;
+    bool flow; /* RTS/CTS のハードウェアフロー制御 */
+} cdk_uart_args_t;
+
+/* `uart [baud] [--flow|-f|--noflow]` を読む。
+ *
+ * 既定は 115200 8N1・フロー制御なし。速度は位置引数で 1 つだけ、
+ * フロー制御は旗で指定する。順番はどちらが先でもよい。
+ *
+ * **ピンは引数で変えられない。**外に出せる UART は基板の D-sub / Grove に
+ * 配線された 1 本きりなので、番号を選ばせても間違える余地が増えるだけ。
+ *
+ * **false のとき out には何も書かない。** 半端に埋めると、呼び側が
+ * 速度だけ取れたと誤解して違う速度で開く。`why` には人に見せる理由が入る
+ * （`why` は NULL でもよい）。 */
+bool cdk_shell_uart_parse(int argc, char **argv, cdk_uart_args_t *out,
+                          const char **why);
+
 /* 画面上で何桁ぶんになるかを数える。
  * エスケープ列は 0 桁、全角は 2 桁。色付きプロンプトの幅計算に要る。 */
 int cdk_shell_visible_width(const char *s, size_t len);

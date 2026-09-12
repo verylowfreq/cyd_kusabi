@@ -762,5 +762,108 @@ int main(void)
         T_EQ_INT(SH.len, 0);
     }
 
+    /* ---- uart の引数 ---- */
+
+    T_CASE("uart: 既定は 115200・フロー制御なし");
+    {
+        char *av[] = {"uart"};
+        cdk_uart_args_t g;
+        const char *why = "触られていない";
+        T_CHECK(cdk_shell_uart_parse(1, av, &g, &why));
+        T_EQ_INT(g.baud, 115200);
+        T_CHECK(!g.flow);
+        T_CHECK(why == NULL); /* 通ったら理由は消す */
+    }
+
+    T_CASE("uart: 速度と旗を読む");
+    {
+        cdk_uart_args_t g;
+        char *a1[] = {"uart", "9600"};
+        T_CHECK(cdk_shell_uart_parse(2, a1, &g, NULL));
+        T_EQ_INT(g.baud, 9600);
+        T_CHECK(!g.flow);
+
+        char *a2[] = {"uart", "115200", "--flow"};
+        T_CHECK(cdk_shell_uart_parse(3, a2, &g, NULL));
+        T_EQ_INT(g.baud, 115200);
+        T_CHECK(g.flow);
+
+        char *a3[] = {"uart", "-f"};
+        T_CHECK(cdk_shell_uart_parse(2, a3, &g, NULL));
+        T_EQ_INT(g.baud, 115200); /* 旗だけでも既定の速度で開く */
+        T_CHECK(g.flow);
+
+        /* 順番はどちらが先でもよい */
+        char *a4[] = {"uart", "--flow", "4800"};
+        T_CHECK(cdk_shell_uart_parse(3, a4, &g, NULL));
+        T_EQ_INT(g.baud, 4800);
+        T_CHECK(g.flow);
+
+        /* 後ろの --noflow が勝つ。明示で消せる */
+        char *a5[] = {"uart", "-f", "--noflow"};
+        T_CHECK(cdk_shell_uart_parse(3, a5, &g, NULL));
+        T_CHECK(!g.flow);
+    }
+
+    T_CASE("uart: 速度の範囲と形");
+    {
+        cdk_uart_args_t g;
+        char *lo[] = {"uart", "299"};
+        char *hi[] = {"uart", "3000001"};
+        char *ok_lo[] = {"uart", "300"};
+        char *ok_hi[] = {"uart", "3000000"};
+        T_CHECK(!cdk_shell_uart_parse(2, lo, &g, NULL));
+        T_CHECK(!cdk_shell_uart_parse(2, hi, &g, NULL));
+        T_CHECK(cdk_shell_uart_parse(2, ok_lo, &g, NULL));
+        T_CHECK(cdk_shell_uart_parse(2, ok_hi, &g, NULL));
+
+        /* **`atoi` だと "9600x" が 9600 で通ってしまう。** 打ち間違いが
+         * 黙って別の速度になるので、数字以外が混じったら断る。 */
+        char *junk[] = {"uart", "9600x"};
+        char *neg[] = {"uart", "-9600"};
+        char *empty[] = {"uart", ""};
+        char *huge[] = {"uart", "99999999999999999999"};
+        T_CHECK(!cdk_shell_uart_parse(2, junk, &g, NULL));
+        T_CHECK(!cdk_shell_uart_parse(2, neg, &g, NULL)); /* 旗として断る */
+        T_CHECK(!cdk_shell_uart_parse(2, empty, &g, NULL));
+        T_CHECK(!cdk_shell_uart_parse(2, huge, &g, NULL)); /* 溢れさせない */
+    }
+
+    T_CASE("uart: 知らない指定と速度の重複は断る");
+    {
+        cdk_uart_args_t g;
+        const char *why = NULL;
+        char *unk[] = {"uart", "--fast"};
+        T_CHECK(!cdk_shell_uart_parse(2, unk, &g, &why));
+        T_CHECK(why != NULL); /* 人に見せる理由が入る */
+
+        char *two[] = {"uart", "9600", "115200"};
+        T_CHECK(!cdk_shell_uart_parse(3, two, &g, NULL));
+
+        char *nul[] = {"uart", NULL};
+        T_CHECK(!cdk_shell_uart_parse(2, nul, &g, NULL));
+        T_CHECK(!cdk_shell_uart_parse(1, NULL, &g, NULL));
+
+        cdk_uart_args_t *nowhere = NULL;
+        T_CHECK(!cdk_shell_uart_parse(1, unk, nowhere, NULL));
+    }
+
+    T_CASE("uart: 断ったときは out を触らない");
+    {
+        /* scp と同じ理由。半端に埋めると、速度だけ取れたと誤解されて
+         * 違う速度で開くことになる。 */
+        cdk_uart_args_t g;
+        memset(&g, 0xAA, sizeof(g));
+        const cdk_uart_args_t before = g;
+
+        char *unk[] = {"uart", "--fast"};
+        T_CHECK(!cdk_shell_uart_parse(2, unk, &g, NULL));
+        T_EQ_MEM(&g, &before, sizeof(g));
+
+        char *bad[] = {"uart", "9600x"};
+        T_CHECK(!cdk_shell_uart_parse(2, bad, &g, NULL));
+        T_EQ_MEM(&g, &before, sizeof(g));
+    }
+
     return t_report("test_shell");
 }

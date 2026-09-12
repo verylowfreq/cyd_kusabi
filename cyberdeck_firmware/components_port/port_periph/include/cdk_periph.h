@@ -74,9 +74,17 @@ esp_err_t cdk_i2c_close(void);
  *
  * ピンは予約表 (cdk_gpio_is_reserved) を通す。塞がっているピンを
  * 指定すると ESP_ERR_INVALID_ARG。
+ *
+ * `flow` が真なら RTS/CTS のハードウェアフロー制御を入れ、rts/cts の
+ * ピンも掴む（予約表にも通す）。偽なら rts/cts は見ないし、そのピンは
+ * 触らないままにする（フロー制御を使わないなら空くピンなので）。
  */
-esp_err_t cdk_uart_open(int tx, int rx, int baud);
+esp_err_t cdk_uart_open(int tx, int rx, int baud, bool flow, int rts, int cts);
 bool      cdk_uart_is_open(void);
+/* **詰まっていたら待たずに捨てて -1 を返す。**
+ * フロー制御を入れて相手の CTS が下がったままだと TX が捌けないので、
+ * uart_write_bytes に渡すと無期限に待つ。呼ぶのはメインループなので、
+ * そこで待つと画面・キー・制御チャネルまで一緒に止まる。 */
 int       cdk_uart_write(const void *p, int n);
 /* 待たない。無ければ 0。 */
 int       cdk_uart_read(void *p, int n);

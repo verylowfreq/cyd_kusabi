@@ -35,6 +35,10 @@
 #define CDK_BOARD_HAS_BATTERY_SENSE 0
 #define CDK_BOARD_HAS_USB_HOST      0
 
+/* **外に出せる UART が無い。** G47/G48 はカメラの D7/D6 で、予約表
+ * (port_periph.c) にも載っている。`uart` コマンドはこの基板では出さない。 */
+#define CDK_BOARD_HAS_EXT_UART      0
+
 /* 制御チャネルは USB-Serial-JTAG。ログは UART1 → FT232。 */
 #define CDK_BOARD_LINK_IS_USB_SERIAL_JTAG 1
 
@@ -141,7 +145,12 @@
 #define CDK_BOARD_LOG_UART_TX  43
 #define CDK_BOARD_LOG_UART_RX  44
 
-/* ---- 外部 UART（D-sub / Grove。排他） ---- */
+/* ---- 外部 UART（D-sub / Grove。排他） ----
+ *
+ * D-sub 側は SP3232EEN がドライバ 2・レシーバ 2 なので、
+ * TX/RX/RTS/CTS がちょうど載る（HARDWARE_DESIGN.md）。RTS/CTS は
+ * フロー制御を使わないなら空くピンで、`uart --flow` のときだけ掴む。 */
+#define CDK_BOARD_HAS_EXT_UART  1
 #define CDK_BOARD_EXT_UART      2
 #define CDK_BOARD_EXT_UART_RX  47
 #define CDK_BOARD_EXT_UART_TX  48
