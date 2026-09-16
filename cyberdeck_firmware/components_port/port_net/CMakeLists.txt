@@ -1,6 +1,6 @@
-idf_component_register(SRCS "port_net.c" "port_ssh.c" "port_scp.c" "port_knownhosts.c" "port_sshkey.c" "port_sock.c"
+idf_component_register(SRCS "port_net.c" "port_ssh.c" "port_scp.c" "port_wget.c" "port_knownhosts.c" "port_sshkey.c" "port_sock.c"
                        INCLUDE_DIRS "include"
-                       REQUIRES esp_wifi esp_netif esp_event lwip libssh2 mbedtls esp-tls
+                       REQUIRES esp_wifi esp_netif esp_event lwip libssh2 mbedtls esp-tls esp_http_client
                                 cdk_sshkey port_cfg port_storage
                        # esp_timer: 接続の刻限を見る（cdk_wifi_poll）
                        PRIV_REQUIRES esp_timer)

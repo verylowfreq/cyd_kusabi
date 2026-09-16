@@ -473,6 +473,63 @@ static int cmd_scp(int argc, char **argv, void *user)
                : 1;
 }
 
+/* `wget` の URL の置き場。`argv` はコマンドが return した時点で無効なので、
+ * 渡す間だけここに持つ（`s_scp` と同じ作法）。 */
+static cdk_wget_args_t s_wget;
+
+static const char *wget_reason(cdk_wget_parse_t e)
+{
+    switch (e) {
+    case CDK_WGET_E_SCHEME:
+        return "http:// か https:// で始まる URL にしてください";
+    case CDK_WGET_E_NO_HOST:
+        return "URL に相手が書かれていません";
+    case CDK_WGET_E_BADCHAR:
+        return "URL に空白や制御文字が入っています";
+    case CDK_WGET_E_TOOLONG:
+        return "URL が長すぎます";
+    default:
+        return "URL が読めません";
+    }
+}
+
+static int cmd_wget(int argc, char **argv, void *user)
+{
+    app_ctx_t   *ctx = ctx_of(user);
+    cdk_shell_t *sh = ctx->sh;
+
+    if (argc != 2 && argc != 3) {
+        cdk_shell_write(sh, "使い方: wget <URL> [名前]\r\n");
+        cdk_shell_write(sh, "名前を省くと URL の末尾の名前で /sdcard に置きます\r\n");
+        return 1;
+    }
+
+    const cdk_wget_parse_t e = cdk_shell_wget_parse(argv[1], &s_wget);
+    if (e != CDK_WGET_OK) {
+        cdk_shell_printf(sh, "\033[31m%s\033[0m\r\n", wget_reason(e));
+        cdk_shell_write(sh, "使い方: wget <URL> [名前]\r\n");
+        return 1;
+    }
+
+    if (!cdk_sd_mounted()) {
+        cdk_shell_write(sh,
+                        "\033[31mSD がマウントされていません (sd mount)\033[0m\r\n");
+        return 1;
+    }
+    if (!cdk_wifi_is_connected()) {
+        /* `ssh` / `scp` と同じ 2 通り分け。 */
+        if (cdk_wifi_poll() == CDK_WIFI_CONNECTING) {
+            cdk_shell_write(sh, "\033[33mWiFi 接続中です。待ってから\033[0m\r\n");
+        } else {
+            cdk_shell_write(
+                sh, "\033[31mWiFi が繋がっていません (wifi connect)\033[0m\r\n");
+        }
+        return 1;
+    }
+
+    return ctx->wget_start(s_wget.url, (argc == 3) ? argv[2] : NULL) ? 0 : 1;
+}
+
 /* ホスト鍵の状態。TOFU で覚えた直後は指紋を確認できるようにしておく。 */
 static int cmd_hostkey(int argc, char **argv, void *user)
 {
@@ -690,6 +747,7 @@ const cdk_shell_cmd_t APP_COMMANDS[] = {
     {"wifi",    "WiFi (wifi connect|off)",                cmd_wifi},
     {"ssh",     "SSH (user@host|close|forget|key|keygen)",       cmd_ssh},
     {"scp",     "ファイル転送 (scp <手元> user@host:<パス>)", cmd_scp},
+    {"wget",    "URL から取る (wget <URL> [名前])",       cmd_wget},
     {"gpio",    "GPIO の mode / set / get",               cmd_gpio},
     {"adc",     "ADC1 を読む (adc read <ch>)",            cmd_adc},
     {"i2c",     "I2C を走査 (i2c scan <sda> <scl>)",      cmd_i2c},

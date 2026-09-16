@@ -212,6 +212,7 @@ SSH でつないだ先でも同じように効く（`Shift+PgUp` は相手には
 | `wifi` | `wifi status` / `wifi connect` / `wifi off` |
 | `ssh` | SSH（`ssh user@host` / `ssh forget` も可。→ 6 章） |
 | `scp` | ファイルの送受信（→ 6 章） |
+| `wget` | URL からファイルを取ってくる（下の「Web からファイルを取ってくる」） |
 | `hostkey` | 接続先のホスト鍵（`hostkey forget` で忘れる） |
 | `sd` | `sd mount` / `sd unmount` |
 | `ls` `cat` `rm` `mkdir` | microSD のファイル操作 |
@@ -279,6 +280,41 @@ uart 115200 --flow    RTS/CTS のフロー制御を入れる（-f でも同じ�
 
 アプリ（`wasm`）が UART を開いている間は `uart` が開けません。
 外に出せる UART は 1 本しかないためです。逆も同じです。
+
+### Web からファイルを取ってくる — `wget`
+
+```
+wget https://example.com/files/memo.txt            memo.txt として置く
+wget https://example.com/files/memo.txt note.txt   note.txt として置く
+```
+
+`http://` と `https://` だけ使えます。https の証明書は必ず確かめます
+（確かめずに繋ぐ指定はありません）。リダイレクトは 10 回まで辿ります。
+WiFi と microSD が要ります。
+
+**名前を省くと** URL の最後の名前（`?` より前）で `/sdcard` に置きます。
+
+- 名前が無い URL（`https://example.com/` など）は `index.html`
+- `%E3%81%82` のような書き方は元の文字に戻します
+- microSD に使えない文字（`\ / : * ? " < > |` など）は `_` に置き換え、
+  長すぎる名前は拡張子を残して縮めます
+- **同じ名前があれば上書きせず** `memo.txt.1`、`memo.txt.2` … にします
+
+**名前を指定すると、同じ名前があっても上書きします**（`scp` と同じ）。
+相対パスは `/sdcard` から見ます。
+
+#### 受け取り中のこと
+
+`scp` と同じく、進み具合が 1 行で出て `Ctrl-C` で止められます。
+止めたり途中で切れたりしても**書きかけのファイルは残りません**。
+
+```
+wget  : <- 48KB 15%
+```
+
+**繋がるまでは待ちます**（最大 8 秒ほど。その間は `Ctrl-C` も効きません）。
+大きさの上限はありません。長さを知らせてこないサーバー
+（`Content-Length` も chunked も無い応答）からは取れません。
 
 ---
 

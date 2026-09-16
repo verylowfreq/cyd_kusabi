@@ -236,6 +236,62 @@ bool cdk_scp_status(cdk_scp_status_t *out);
 /* メインループが毎周呼ぶ。終わっていたら *done を立て、report に 1 行入れる。 */
 void cdk_scp_poll(bool *done, char *report, size_t report_cap);
 
+/* ---------------- WGET ---------------- */
+
+/* 繋いでヘッダを受け取るまでの期限 (ms)。名前解決・TCP・TLS・
+ * リダイレクトを全部含む 1 回ぶん。SSH の接続期限に揃える。 */
+#define CDK_WGET_CONNECT_TIMEOUT_MS CDK_SSH_CONNECT_TIMEOUT_MS
+
+/* 中身を読む 1 回の待ち (ms)。**メインループを止める長さそのもの。**
+ * 来ていなければこれだけ待って戻る。 */
+#define CDK_WGET_READ_TIMEOUT_MS 10
+
+/* 進まなくなったら諦める (ms)。scp と同じ。 */
+#define CDK_WGET_STALL_MS 30000
+
+/* リダイレクトを辿る上限。esp_http_client の既定と同じ。 */
+#define CDK_WGET_MAX_REDIRECTS 10
+
+typedef enum {
+    CDK_WGET_PHASE_IDLE = 0,
+    CDK_WGET_PHASE_XFER, /* 中身を受け取っている */
+    CDK_WGET_PHASE_DONE
+} cdk_wget_phase_t;
+
+typedef struct {
+    cdk_wget_phase_t phase;
+    uint32_t         done;
+    uint32_t         total; /* 0 なら未定（chunked） */
+} cdk_wget_status_t;
+
+/* 起動時に 1 回。受け取り用の領域を PSRAM から取る。 */
+esp_err_t cdk_wget_init(void);
+
+/* 繋いでリダイレクトを辿り、ヘッダを受け取るところまでやって返る。
+ *
+ * **ここはブロッキング**（名前解決と TLS ハンドシェイクは刻めない。
+ * scp の認証待ちと同じ扱い）。中身はそのあと `cdk_wget_poll()` が
+ * メインループから刻む。
+ *
+ * url は `cdk_shell_wget_parse()` を通したもの。final_path は
+ * **`cdk_wasm_path_resolve()` を通した絶対パス**で、あれば上書きする
+ * （連番に逃がすかは呼び側が決める）。書きかけは `final_path.tmp`。
+ *
+ * why には失敗の理由を人が読める形で入れる。 */
+esp_err_t cdk_wget_start(const char *url, const char *final_path, char *why,
+                         size_t why_cap);
+
+bool cdk_wget_busy(void);
+
+/* Ctrl-C。**伝えるだけで待たない。** 次の刻みで止まる。 */
+void cdk_wget_abort(void);
+
+/* いまの進み具合。走っていなければ false。 */
+bool cdk_wget_status(cdk_wget_status_t *out);
+
+/* メインループが毎周呼ぶ。終わっていたら *done を立て、report に 1 行入れる。 */
+void cdk_wget_poll(bool *done, char *report, size_t report_cap);
+
 /* ---------------- SSH の鍵 ---------------- */
 
 /* 実機で ECDSA P-256 の鍵を作り、PEM を path に、公開鍵 1 行を

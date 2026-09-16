@@ -865,5 +865,109 @@ int main(void)
         T_EQ_MEM(&g, &before, sizeof(g));
     }
 
+    T_CASE("wget: URL を確かめる");
+    {
+        cdk_wget_args_t g;
+        T_EQ_INT(cdk_shell_wget_parse("http://example.com/a.txt", &g), CDK_WGET_OK);
+        T_CHECK(!g.https);
+        T_EQ_STR(g.url, "http://example.com/a.txt");
+        T_EQ_INT(cdk_shell_wget_parse("HTTPS://example.com", &g), CDK_WGET_OK);
+        T_CHECK(g.https);
+        T_EQ_INT(cdk_shell_wget_parse("https://u@h:8443/x", &g), CDK_WGET_OK);
+
+        T_EQ_INT(cdk_shell_wget_parse("ftp://example.com/a", &g), CDK_WGET_E_SCHEME);
+        T_EQ_INT(cdk_shell_wget_parse("example.com/a", &g), CDK_WGET_E_SCHEME);
+        T_EQ_INT(cdk_shell_wget_parse("http:/example.com", &g), CDK_WGET_E_SCHEME);
+        T_EQ_INT(cdk_shell_wget_parse("http://", &g), CDK_WGET_E_NO_HOST);
+        T_EQ_INT(cdk_shell_wget_parse("http:///a", &g), CDK_WGET_E_NO_HOST);
+        T_EQ_INT(cdk_shell_wget_parse("http://u@/a", &g), CDK_WGET_E_NO_HOST);
+        T_EQ_INT(cdk_shell_wget_parse("http://:80/a", &g), CDK_WGET_E_NO_HOST);
+        T_EQ_INT(cdk_shell_wget_parse("http://h/a b", &g), CDK_WGET_E_BADCHAR);
+
+        char long_url[CDK_WGET_URL_MAX + 8];
+        memset(long_url, 'a', sizeof(long_url));
+        memcpy(long_url, "http://h/", 9);
+        long_url[sizeof(long_url) - 1] = '\0';
+        T_EQ_INT(cdk_shell_wget_parse(long_url, &g), CDK_WGET_E_TOOLONG);
+
+        /* 断ったときは out を触らない */
+        memset(&g, 0xAA, sizeof(g));
+        const cdk_wget_args_t before = g;
+        T_CHECK(cdk_shell_wget_parse("gopher://h/", &g) != CDK_WGET_OK);
+        T_EQ_MEM(&g, &before, sizeof(g));
+    }
+
+    T_CASE("wget: URL から保存名を作る");
+    {
+        char n[64];
+        T_CHECK(cdk_shell_wget_name("http://h/dir/a.txt", n, sizeof(n)));
+        T_EQ_STR(n, "a.txt");
+        T_CHECK(cdk_shell_wget_name("http://h/a.txt?x=1#top", n, sizeof(n)));
+        T_EQ_STR(n, "a.txt");
+        /* 名前が無ければ index.html */
+        T_CHECK(cdk_shell_wget_name("http://h", n, sizeof(n)));
+        T_EQ_STR(n, "index.html");
+        T_CHECK(cdk_shell_wget_name("http://h/", n, sizeof(n)));
+        T_EQ_STR(n, "index.html");
+        T_CHECK(cdk_shell_wget_name("http://h/dir/", n, sizeof(n)));
+        T_EQ_STR(n, "index.html");
+        T_CHECK(cdk_shell_wget_name("http://h?q=/a.txt", n, sizeof(n)));
+        T_EQ_STR(n, "index.html");
+        T_CHECK(cdk_shell_wget_name("http://h/..", n, sizeof(n)));
+        T_EQ_STR(n, "index.html");
+        /* %XX を復号する。UTF-8 はそのまま使う */
+        T_CHECK(cdk_shell_wget_name("http://h/%E3%81%82.txt", n, sizeof(n)));
+        T_EQ_STR(n, "\xE3\x81\x82.txt");
+        /* FAT で使えない文字は _。%2F で / を作っても階層にしない */
+        T_CHECK(cdk_shell_wget_name("http://h/a:b*c%3F%22%3C%3E%7C%5C%2Fd", n, sizeof(n)));
+        T_EQ_STR(n, "a_b_c_______d");
+        T_CHECK(cdk_shell_wget_name("http://h/a%00b%0Ac", n, sizeof(n)));
+        T_EQ_STR(n, "a_b_c");
+        /* 壊れた % はそのまま、壊れた UTF-8 は _ */
+        T_CHECK(cdk_shell_wget_name("http://h/100%25%zz%4", n, sizeof(n)));
+        T_EQ_STR(n, "100%%zz%4");
+        T_CHECK(cdk_shell_wget_name("http://h/a%FFb%E3%81", n, sizeof(n)));
+        T_EQ_STR(n, "a_b__");
+        /* 先頭の空白、末尾の . と空白は削る */
+        T_CHECK(cdk_shell_wget_name("http://h/%20%20a.txt.%20.", n, sizeof(n)));
+        T_EQ_STR(n, "a.txt");
+        T_CHECK(cdk_shell_wget_name("http://h/.bashrc", n, sizeof(n)));
+        T_EQ_STR(n, ".bashrc");
+
+        /* 長ければ拡張子を残し、文字境界で切る */
+        char small[12]; /* 11 バイトまで */
+        T_CHECK(cdk_shell_wget_name("http://h/abcdefghijklmnop.txt", small, sizeof(small)));
+        T_EQ_STR(small, "abcdefg.txt");
+        /* あ(3) × 4 + .txt → 前半 7 バイトに「あ」は 2 つしか入らない */
+        T_CHECK(cdk_shell_wget_name("http://h/%E3%81%82%E3%81%82%E3%81%82%E3%81%82.txt",
+                                    small, sizeof(small)));
+        T_EQ_STR(small, "\xE3\x81\x82\xE3\x81\x82.txt");
+        /* 拡張子が長すぎれば、ただ切る */
+        T_CHECK(cdk_shell_wget_name("http://h/ab.cdefghijklmnopqrstuvwxyz", small,
+                                    sizeof(small)));
+        T_EQ_STR(small, "ab.cdefghij");
+
+        /* 255 バイトを超えない */
+        char url[700];
+        char big[400];
+        snprintf(url, sizeof(url), "http://h/");
+        memset(url + 9, 'x', 300);
+        memcpy(url + 309, ".bin", 5);
+        T_CHECK(cdk_shell_wget_name(url, big, sizeof(big)));
+        T_EQ_INT((int)strlen(big), 255);
+        T_CHECK(strcmp(big + 251, ".bin") == 0);
+
+        char tiny[8];
+        T_CHECK(!cdk_shell_wget_name("http://h/a", tiny, sizeof(tiny)));
+    }
+
+    T_CASE("wget: 同名の逃がし先");
+    {
+        char n[16];
+        T_CHECK(cdk_shell_wget_numbered("/sdcard/a.txt", 1, n, sizeof(n)));
+        T_EQ_STR(n, "/sdcard/a.txt.1");
+        T_CHECK(!cdk_shell_wget_numbered("/sdcard/a.txt", 10, n, sizeof(n)));
+    }
+
     return t_report("test_shell");
 }

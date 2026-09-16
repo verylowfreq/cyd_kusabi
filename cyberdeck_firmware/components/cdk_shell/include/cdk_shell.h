@@ -210,6 +210,48 @@ typedef struct {
 bool cdk_shell_uart_parse(int argc, char **argv, cdk_uart_args_t *out,
                           const char **why);
 
+/* ---- wget の引数 ---- */
+
+typedef enum {
+    CDK_WGET_OK = 0,
+    CDK_WGET_E_SCHEME,  /* http:// / https:// で始まっていない */
+    CDK_WGET_E_NO_HOST, /* `http://` のあとに相手が無い */
+    CDK_WGET_E_BADCHAR, /* 空白や制御文字を含む */
+    CDK_WGET_E_TOOLONG  /* 入らない。切り詰めない */
+} cdk_wget_parse_t;
+
+/* URL の上限。`esp_http_client` に渡すのはこれ。 */
+#define CDK_WGET_URL_MAX 384
+
+typedef struct {
+    char url[CDK_WGET_URL_MAX];
+    bool https;
+} cdk_wget_args_t;
+
+/* `wget` の URL を確かめる。**http と https だけ**（大文字小文字は問わない）。
+ *
+ * **OK 以外のとき out には何も書かない**（scp_parse と同じ約束）。 */
+cdk_wget_parse_t cdk_shell_wget_parse(const char *url, cdk_wget_args_t *out);
+
+/* URL から保存名（ディレクトリを含まない 1 要素）を作る。
+ *
+ *  - パスの最後の `/` より後ろ、`?` `#` より前。`%XX` は復号する
+ *  - 名前が無い（`http://host/` など）ときは `index.html`（wget と同じ）
+ *  - FAT で使えない `\ / : * ? " < > |`、制御文字、UTF-8 として壊れた
+ *    バイトは `_` にする。**FATFS は UTF-8 の API なので、壊れた列を
+ *    渡すと開けない**
+ *  - 先頭の空白と末尾の `.` / 空白は削る（FATFS が黙って削るので、
+ *    削る前の名前で「既にあるか」を見ると食い違う）
+ *  - 長ければ **UTF-8 の文字境界で**、拡張子を残して切る。上限は
+ *    `cap - 1` と 255 バイトの小さいほう
+ *
+ * cap が小さすぎる（`index.html` が入らない）ときだけ false。 */
+bool cdk_shell_wget_name(const char *url, char *out, size_t cap);
+
+/* 同名があったときの逃がし先。`a.txt` + 1 → `a.txt.1`（wget と同じ）。
+ * 入らなければ false。 */
+bool cdk_shell_wget_numbered(const char *path, int n, char *out, size_t cap);
+
 /* 画面上で何桁ぶんになるかを数える。
  * エスケープ列は 0 桁、全角は 2 桁。色付きプロンプトの幅計算に要る。 */
 int cdk_shell_visible_width(const char *s, size_t len);

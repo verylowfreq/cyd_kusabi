@@ -46,6 +46,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "secrets.h"
 
@@ -143,6 +144,7 @@ typedef enum {
     SESSION_EDIT,
     SESSION_WASM,
     SESSION_SCP,
+    SESSION_WGET,
 #if CDK_BOARD_HAS_EXT_UART
     SESSION_UART
 #endif
@@ -252,6 +254,21 @@ static void enter_scp(void)
 }
 
 static void leave_scp(void)
+{
+    enter_shell();
+}
+
+/* `wget`。**scp と同じ理由でシェルを止める**（FATFS の空きハンドルは
+ * 本体に 1 本しか無く、受け取り中の `.tmp` がそれを握っている）。 */
+static void enter_wget(void)
+{
+    s_session = SESSION_WGET;
+    drop_preedit();
+    cdk_shell_end(&s_shell);
+    s_dirty = true;
+}
+
+static void leave_wget(void)
 {
     enter_shell();
 }
@@ -524,6 +541,17 @@ static void route_key(void *user, const cdk_key_t *k)
         return;
     }
 
+    if (s_session == SESSION_WGET) {
+        /* scp と同じ。Ctrl-C だけ拾って残りは捨てる。 */
+        if ((k->mods & CDK_MOD_CTRL_BIT) &&
+            (k->codepoint == 'c' || k->codepoint == 'C')) {
+            cdk_wget_abort();
+            term_printf("\r\n\033[33mwget  : 止めています...\033[0m\r\n");
+            s_dirty = true;
+        }
+        return;
+    }
+
     if (s_session == SESSION_SSH && cdk_ssh_is_open()) {
         uint8_t out[16];
         const size_t n = cdk_keys_encode(k, s_term.app_cursor_keys, out, sizeof(out));
@@ -615,6 +643,18 @@ static void route_bytes(const uint8_t *data, size_t len)
             if (data[i] == 0x03) {
                 cdk_scp_abort();
                 term_printf("\r\n\033[33mscp   : 止めています...\033[0m\r\n");
+                s_dirty = true;
+                return;
+            }
+        }
+        return; /* 残りは捨てる */
+    }
+    /* wget も同じ。**ここを忘れると `cdk.py key ctrl+c` が効かない。** */
+    if (s_session == SESSION_WGET) {
+        for (size_t i = 0; i < len; i++) {
+            if (data[i] == 0x03) {
+                cdk_wget_abort();
+                term_printf("\r\n\033[33mwget  : 止めています...\033[0m\r\n");
                 s_dirty = true;
                 return;
             }
@@ -912,6 +952,41 @@ static void scp_progress_line(void)
     } else {
         term_printf("\r\033[K\033[33mscp   : %s %luKB\033[0m", arrow,
                     (unsigned long)((st.done + 1023u) / 1024u));
+    }
+}
+
+/* `wget` の進み具合。`scp_progress_line` と同じ作り（1 行を書き直す、
+ * 変わったときだけ 300ms 空けて）。chunked だと全体が分からないので KB だけ。 */
+static void wget_progress_line(void)
+{
+    cdk_wget_status_t st;
+    if (!cdk_wget_status(&st)) {
+        return;
+    }
+
+    static uint32_t last_ms;
+    static uint32_t last_kb = 0xFFFFFFFFu;
+    const uint32_t  kb = (st.done + 1023u) / 1024u;
+    const uint32_t  now = now_ms();
+    if (kb == last_kb || now - last_ms < 300u) {
+        return;
+    }
+    last_ms = now;
+    last_kb = kb;
+
+    if (st.total > 0) {
+        const uint32_t pct = (uint32_t)((uint64_t)st.done * 100u / st.total);
+        if (s_term.cols < 60) {
+            term_printf("\r\033[K\033[33mwget  : <- %luKB %lu%%\033[0m",
+                        (unsigned long)kb, (unsigned long)pct);
+        } else {
+            term_printf("\r\033[K\033[33mwget  : <- %luKB / %luKB  %lu%%\033[0m",
+                        (unsigned long)kb,
+                        (unsigned long)((st.total + 1023u) / 1024u),
+                        (unsigned long)pct);
+        }
+    } else {
+        term_printf("\r\033[K\033[33mwget  : <- %luKB\033[0m", (unsigned long)kb);
     }
 }
 
@@ -1503,6 +1578,91 @@ static bool app_scp_start(bool upload, const char *local, const char *remote,
     return true;
 }
 
+/* あるか（ファイルでもディレクトリでも）。 */
+static bool sd_exists(const char *path)
+{
+    struct stat st;
+    cdk_sd_lock();
+    const int rc = stat(path, &st);
+    cdk_sd_unlock();
+    return rc == 0;
+}
+
+/* `wget`。**名前を決めるのはここ。** 繋いでヘッダを受け取るまで待ち、
+ * そのあとはメインループが刻む。
+ *
+ *  - 名前を指定されたら、そのまま（あれば上書き。scp と同じ）
+ *  - 省かれたら URL から作り（`cdk_shell_wget_name`）、同名があれば
+ *    `.1` `.2` … に逃がす（本家 wget と同じ）。**`.tmp` も同名とみなす**
+ *    （書きかけの隣に置くと、片方の後片付けがもう片方を消す）
+ *
+ * どちらもパスは **`cdk_wasm_path_resolve()`** を通す（**規則を 2 か所に
+ * 持たない**）。 */
+static bool app_wget_start(const char *url, const char *name)
+{
+    static char full[CDK_WASM_PATH_MAX];
+    static char cand[CDK_WASM_PATH_MAX];
+    const char *path = full;
+
+    if (name != NULL) {
+        const int pr =
+            cdk_wasm_path_resolve(name, (int)strlen(name), full, (int)sizeof(full));
+        if (pr != CDK_E_OK) {
+            term_printf("\033[31mwget  : %s\033[0m\r\n",
+                        (pr == CDK_E_PERM) ? "microSD の外は触れません"
+                                           : "パスが読めません");
+            return false;
+        }
+        struct stat st;
+        cdk_sd_lock();
+        const bool is_dir = (stat(full, &st) == 0) && S_ISDIR(st.st_mode);
+        cdk_sd_unlock();
+        if (is_dir) {
+            term_printf("\033[31mwget  : %s はディレクトリです\033[0m\r\n", full);
+            return false;
+        }
+    } else {
+        /* `/sdcard/` と `.tmp` と `.99` が入る長さに抑える。 */
+        char      base[CDK_WASM_PATH_MAX - 24];
+        const int pr = cdk_shell_wget_name(url, base, sizeof(base))
+                           ? cdk_wasm_path_resolve(base, (int)strlen(base), full,
+                                                   (int)sizeof(full))
+                           : CDK_E_INVAL;
+        if (pr != CDK_E_OK) {
+            term_printf("\033[31mwget  : 名前を作れません。名前を指定してください"
+                        "\033[0m\r\n");
+            return false;
+        }
+        for (int n = 0;; n++) {
+            if (n == 0) {
+                snprintf(cand, sizeof(cand), "%s", full);
+            } else if (n > 99 || !cdk_shell_wget_numbered(full, n, cand, sizeof(cand))) {
+                term_printf("\033[31mwget  : 同じ名前が多すぎます。名前を指定してください"
+                            "\033[0m\r\n");
+                return false;
+            }
+            char tmp[CDK_WASM_PATH_MAX + 8];
+            snprintf(tmp, sizeof(tmp), "%s.tmp", cand);
+            if (!sd_exists(cand) && !sd_exists(tmp)) {
+                break;
+            }
+        }
+        path = cand;
+    }
+
+    term_printf("wget  : %s\r\n", url);
+    term_printf("wget  : -> %s\r\n", path);
+
+    char            why[128] = {0};
+    const esp_err_t err = cdk_wget_start(url, path, why, sizeof(why));
+    if (err != ESP_OK) {
+        term_printf("\033[31mwget  : %s\033[0m\r\n", why);
+        return false;
+    }
+    enter_wget();
+    return true;
+}
+
 static void app_ssh_close(void)
 {
     cdk_ssh_close();
@@ -1751,6 +1911,7 @@ void app_main(void)
         .wifi_off = app_wifi_off,
         .ssh_open = app_ssh_open_to,
         .scp_start = app_scp_start,
+        .wget_start = app_wget_start,
         .ssh_close = app_ssh_close,
         .ssh_is_open = app_ssh_is_open,
         .ssh_forget = app_ssh_forget,
@@ -1835,6 +1996,10 @@ void app_main(void)
      * 取れなくても scp が使えないだけなので、続ける。 */
     if (cdk_scp_init() != ESP_OK) {
         term_printf("\033[33mscp   : 置き場を確保できません（scp は使えません）"
+                    "\033[0m\r\n");
+    }
+    if (cdk_wget_init() != ESP_OK) {
+        term_printf("\033[33mwget  : 置き場を確保できません（wget は使えません）"
                     "\033[0m\r\n");
     }
 
@@ -1985,6 +2150,17 @@ void app_main(void)
                 leave_scp();
             } else {
                 scp_progress_line();
+            }
+        }
+        if (s_session == SESSION_WGET) {
+            bool done = false;
+            char report[192];
+            cdk_wget_poll(&done, report, sizeof(report));
+            if (done) {
+                term_printf("%s", report);
+                leave_wget();
+            } else {
+                wget_progress_line();
             }
         }
 

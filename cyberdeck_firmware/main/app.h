@@ -43,6 +43,14 @@ typedef struct {
     bool (*scp_start)(bool upload, const char *local, const char *remote,
                       const char *user, const char *host);
 
+    /* HTTP / HTTPS でファイルを 1 本取ってくる。走り出せたら true。
+     *
+     * url は `cdk_shell_wget_parse()` を通したもの。name は保存先で、
+     * NULL なら URL から名前を作って /sdcard に置く。**指定した名前は
+     * 上書きし、作った名前は同名があれば `.1` `.2` … に逃がす。**
+     * 繋いでヘッダを受け取るまで待ち、そのあとはメインループが刻む。 */
+    bool (*wget_start)(const char *url, const char *name);
+
     /* 日本語入力。状態は main.c が 1 つだけ持つ。 */
     void                  (*skk_set_mode)(cdk_skk_mode_t m);
     cdk_skk_mode_t        (*skk_get_mode)(void);

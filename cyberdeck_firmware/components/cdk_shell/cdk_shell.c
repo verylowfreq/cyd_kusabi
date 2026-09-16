@@ -2,6 +2,7 @@
 
 #include "cdk_text.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -631,6 +632,204 @@ bool cdk_shell_uart_parse(int argc, char **argv, cdk_uart_args_t *out,
 fail:
     if (why != NULL) *why = reason;
     return false;
+}
+
+/* ---- wget の引数 ---- */
+
+/* `http://` / `https://` を大文字小文字を問わず剥がす。
+ * 当たらなければ NULL。 */
+static const char *skip_http_scheme(const char *url, bool *https)
+{
+    static const char *const names[] = {"http://", "https://"};
+    for (int k = 0; k < 2; k++) {
+        const size_t n = strlen(names[k]);
+        size_t       i = 0;
+        for (; i < n; i++) {
+            char c = url[i];
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (c != names[k][i]) break;
+        }
+        if (i == n) {
+            if (https != NULL) *https = (k == 1);
+            return url + n;
+        }
+    }
+    return NULL;
+}
+
+cdk_wget_parse_t cdk_shell_wget_parse(const char *url, cdk_wget_args_t *out)
+{
+    if (url == NULL || out == NULL) return CDK_WGET_E_SCHEME;
+
+    bool        https = false;
+    const char *auth = skip_http_scheme(url, &https);
+    if (auth == NULL) return CDK_WGET_E_SCHEME;
+
+    for (const char *p = url; *p != '\0'; p++) {
+        const unsigned char c = (unsigned char)*p;
+        if (c <= 0x20 || c == 0x7F) return CDK_WGET_E_BADCHAR;
+    }
+
+    /* 相手は `/ ? #` の手前まで。`user@` と `:port` を除いて空なら断る。 */
+    const size_t alen = strcspn(auth, "/?#");
+    const char  *host = auth;
+    for (size_t i = 0; i < alen; i++) {
+        if (auth[i] == '@') host = auth + i + 1;
+    }
+    const size_t hlen = (size_t)(auth + alen - host);
+    if (hlen == 0 || host[0] == ':') return CDK_WGET_E_NO_HOST;
+
+    if (strlen(url) >= sizeof(out->url)) return CDK_WGET_E_TOOLONG;
+
+    snprintf(out->url, sizeof(out->url), "%s", url);
+    out->https = https;
+    return CDK_WGET_OK;
+}
+
+static int hex_val(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* s[i] から始まる UTF-8 の 1 文字の長さ。壊れていれば 0。
+ * 冗長な表現とサロゲートも壊れているとみなす（FATFS が受け付けない）。
+ *
+ * `cdk_utf8_decode` を使わないのは、あれが描画向けで「不正バイトを消費
+ * しない（0 を返す）」ことがあり、1 バイトずつ `_` に置き換える用途に
+ * 合わないため。 */
+static size_t utf8_len_at(const unsigned char *s, size_t n, size_t i)
+{
+    const unsigned char c = s[i];
+    if (c < 0x80) return 1;
+    size_t   len;
+    uint32_t cp;
+    if (c >= 0xC2 && c <= 0xDF) {
+        len = 2;
+        cp = c & 0x1F;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+        len = 3;
+        cp = c & 0x0F;
+    } else if (c >= 0xF0 && c <= 0xF4) {
+        len = 4;
+        cp = c & 0x07;
+    } else {
+        return 0;
+    }
+    if (i + len > n) return 0;
+    for (size_t k = 1; k < len; k++) {
+        if ((s[i + k] & 0xC0) != 0x80) return 0;
+        cp = (cp << 6) | (s[i + k] & 0x3F);
+    }
+    if (len == 3 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF))) return 0;
+    if (len == 4 && (cp < 0x10000 || cp > 0x10FFFF)) return 0;
+    return len;
+}
+
+/* 保存名の上限（バイト）。FAT の LFN は 255 文字なので、バイトで
+ * 255 に収めれば必ず入る。 */
+#define WGET_NAME_MAX 255
+
+bool cdk_shell_wget_name(const char *url, char *out, size_t cap)
+{
+    static const char fallback[] = "index.html";
+    if (out == NULL || cap < sizeof(fallback)) return false;
+    out[0] = '\0';
+    if (url == NULL) url = "";
+
+    /* 名前の部分を取り出す: 相手の後ろのパスの、最後の `/` より後ろ。 */
+    const char *p = skip_http_scheme(url, NULL);
+    if (p == NULL) p = url;
+    const size_t end = strcspn(p, "?#");
+    const char  *slash = NULL;
+    for (size_t i = 0; i < end; i++) {
+        if (p[i] == '/') slash = p + i;
+    }
+    const char  *seg = (slash != NULL) ? slash + 1 : p + end; /* パスが無い */
+    const size_t seglen = (size_t)(p + end - seg);
+
+    /* `%XX` を復号しながら、使えない文字を `_` に。 */
+    unsigned char buf[WGET_NAME_MAX * 3 + 1];
+    size_t        n = 0;
+    for (size_t i = 0; i < seglen && n < sizeof(buf) - 1; i++) {
+        unsigned char c = (unsigned char)seg[i];
+        if (c == '%' && i + 2 < seglen) {
+            const int hi = hex_val(seg[i + 1]);
+            const int lo = hex_val(seg[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                c = (unsigned char)(hi * 16 + lo);
+                i += 2;
+            }
+        }
+        if (c < 0x20 || c == 0x7F || strchr("\\/:*?\"<>|", (int)c) != NULL) {
+            c = '_';
+        }
+        buf[n++] = c;
+    }
+
+    /* 壊れた UTF-8 は 1 バイトずつ `_` にする。 */
+    for (size_t i = 0; i < n;) {
+        const size_t l = utf8_len_at(buf, n, i);
+        if (l == 0) {
+            buf[i++] = '_';
+        } else {
+            i += l;
+        }
+    }
+
+    /* 先頭の空白、末尾の `.` と空白を削る。 */
+    size_t head = 0;
+    while (head < n && buf[head] == ' ') head++;
+    while (n > head && (buf[n - 1] == '.' || buf[n - 1] == ' ')) n--;
+    const unsigned char *name = buf + head;
+    size_t               len = n - head;
+
+    if (len == 0) {
+        snprintf(out, cap, "%s", fallback);
+        return true;
+    }
+
+    size_t max = cap - 1;
+    if (max > WGET_NAME_MAX) max = WGET_NAME_MAX;
+
+    if (len <= max) {
+        memcpy(out, name, len);
+        out[len] = '\0';
+        return true;
+    }
+
+    /* 長い。拡張子（先頭以外の最後の `.` から、16 バイトまで）を残す。 */
+    size_t ext = 0;
+    for (size_t i = len; i > 1; i--) {
+        if (name[i - 1] == '.') {
+            if (len - (i - 1) <= 16) ext = len - (i - 1);
+            break;
+        }
+    }
+    if (ext >= max) ext = 0;
+
+    /* 前半を文字境界で切る。 */
+    const size_t room = max - ext;
+    size_t       cut = 0;
+    while (cut < len - ext) {
+        size_t l = utf8_len_at(name, len, cut);
+        if (l == 0) l = 1; /* 上で直してあるので来ないが、止まらないように */
+        if (cut + l > room) break;
+        cut += l;
+    }
+    memcpy(out, name, cut);
+    memcpy(out + cut, name + len - ext, ext);
+    out[cut + ext] = '\0';
+    return true;
+}
+
+bool cdk_shell_wget_numbered(const char *path, int n, char *out, size_t cap)
+{
+    if (path == NULL || out == NULL || cap == 0 || n < 0) return false;
+    const int w = snprintf(out, cap, "%s.%d", path, n);
+    return w > 0 && (size_t)w < cap;
 }
 
 void cdk_shell_notify(cdk_shell_t *sh, const char *s)
