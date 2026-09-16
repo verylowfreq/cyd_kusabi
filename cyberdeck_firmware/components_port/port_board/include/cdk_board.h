@@ -136,6 +136,10 @@
 /* ---- 電池電圧（ADC1。ADC2 は WiFi 使用中に読めない） ---- */
 #define CDK_BOARD_BATT_ADC_GPIO 5
 #define CDK_BOARD_BATT_ADC_CH   4 /* ADC1_CH4 */
+/* 分圧比。ピンには電池電圧の 1/2 が来る。
+ * NiMH x2 満充電 約 2.8V / 新品アルカリ x2 約 3.2V → ピンで 1.4-1.6V。
+ * 12dB 減衰（〜3.1V）の範囲に余裕で収まる。 */
+#define CDK_BOARD_BATT_DIV      2
 
 /* ---- デバッグの 2 チャネル（HARDWARE_DESIGN.md F-1） ---- */
 #define CDK_BOARD_LINK_UART     1 /* 制御チャネル */

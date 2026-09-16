@@ -228,6 +228,33 @@ esp_err_t cdk_adc_read(int channel, int *raw, int *mv)
     return ESP_OK;
 }
 
+esp_err_t cdk_batt_read_mv(int *mv)
+{
+    if (mv == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+#if CDK_BOARD_HAS_BATTERY_SENSE
+    /* 1 回だけだと ±数十 mV 揺れ、帯の表示が毎回変わって描き直しが続く。 */
+    enum { N = 8 };
+    int sum = 0;
+    for (int i = 0; i < N; i++) {
+        int raw = 0, v = -1;
+        const esp_err_t err = cdk_adc_read(CDK_BOARD_BATT_ADC_CH, &raw, &v);
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (v < 0) {
+            return ESP_ERR_INVALID_STATE; /* 校正が無い。生値からの換算はしない */
+        }
+        sum += v;
+    }
+    *mv = (sum / N) * CDK_BOARD_BATT_DIV;
+    return ESP_OK;
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 /* ------------------------------------------------------------------ */
 /* I2C                                                                 */
 /* ------------------------------------------------------------------ */

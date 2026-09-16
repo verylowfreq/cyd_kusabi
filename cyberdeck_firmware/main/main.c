@@ -830,6 +830,30 @@ static void term_printf(const char *fmt, ...)
  * **DECSTBM で最下行を確保する手は使えない。** vi も less も top も自分で
  * スクロール領域を設定するか ESC[r で解除して全画面を使うので、SSH 先で
  * それらを動かした瞬間に上書きされる。グリッドの外に置けば触られない。 */
+/* 電池電圧。**帯のために毎周は読まない。** メインループは速く回るので、
+ * 毎周 ADC を 8 回読むと無駄が大きいし、読むたびに数 mV 揺れて
+ * 帯の描き直しが止まらない。電池はそんなに速く減らない。 */
+#define BATT_PERIOD_MS 10000u
+static int      s_batt_mv;
+static uint32_t s_batt_at;
+static bool     s_batt_read_once;
+
+static int batt_mv_cached(void)
+{
+#if CDK_BOARD_HAS_BATTERY_SENSE
+    const uint32_t now = now_ms();
+    if (!s_batt_read_once || now - s_batt_at >= BATT_PERIOD_MS) {
+        int mv = 0;
+        s_batt_mv = (cdk_batt_read_mv(&mv) == ESP_OK) ? mv : 0;
+        s_batt_at = now;
+        s_batt_read_once = true;
+    }
+    return s_batt_mv;
+#else
+    return 0;
+#endif
+}
+
 static void draw_status(bool force)
 {
     if (!s_statusbar) {
@@ -858,6 +882,7 @@ static void draw_status(bool force)
     }
 #endif
     st.scroll_back = cdk_term_view_offset(&s_term);
+    st.batt_mv = batt_mv_cached();
 
     char line[160];
     cdk_status_format(&st, s_term.cols, line, sizeof(line));

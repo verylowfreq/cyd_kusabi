@@ -110,6 +110,16 @@ static int cmd_info(int argc, char **argv, void *user)
     cdk_shell_printf(sh, "wifi    : %s (%s)\r\n",
                      cdk_wifi_is_connected() ? "接続" : "未接続", ip);
     cdk_shell_printf(sh, "ssh     : %s\r\n", ctx->ssh_is_open() ? "接続" : "未接続");
+
+    /* 残量 % は出さない。NiMH とアルカリのどちらも入るので、
+     * 同じ電圧でも残りがまるで違う。 */
+    int mv = 0;
+    const esp_err_t berr = cdk_batt_read_mv(&mv);
+    if (berr == ESP_OK) {
+        cdk_shell_printf(sh, "電池    : %d.%02d V\r\n", mv / 1000, (mv % 1000) / 10);
+    } else if (berr != ESP_ERR_NOT_SUPPORTED) {
+        cdk_shell_printf(sh, "電池    : 読めません (%s)\r\n", esp_err_to_name(berr));
+    }
     return 0;
 }
 

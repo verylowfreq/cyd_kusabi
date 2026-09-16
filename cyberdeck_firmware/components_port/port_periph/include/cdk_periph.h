@@ -36,6 +36,11 @@ esp_err_t cdk_gpio_get(int pin, int *level);
  * mv には校正済みの電圧 [mV] が入る（校正が使えなければ -1）。 */
 esp_err_t cdk_adc_read(int channel, int *raw, int *mv);
 
+/* 電池電圧 [mV]（分圧を戻した値）。**残量 % にはしない。**
+ * NiMH とアルカリのどちらも入りうるので、電圧から % への対応が決まらない。
+ * 何回か読んで平均する。測る口の無い基板では ESP_ERR_NOT_SUPPORTED。 */
+esp_err_t cdk_batt_read_mv(int *mv);
+
 /* ---- I2C ---- */
 
 /* 指定ピンに一時的なマスタを作って 0x08-0x77 を叩く。
