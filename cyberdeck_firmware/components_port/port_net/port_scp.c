@@ -28,7 +28,9 @@
  *    相手の返事を 1 個読み、`send_eof` → `wait_eof` → `wait_closed`。
  *    省くと相手側が確定せず、**中身が切れたファイルや 0 バイトが届く。**
  *  - **受信は `st_size` ちょうどで読み終える。** 1 バイトでも余分に読むと、
- *    枠組みの終端待ちで固まる。
+ *    枠組みの終端待ちで固まる。そのあと終端の NUL を 1 個だけ読み、続きが
+ *    来ないことを時計つきで確かめる（4GB 超で申告が切られていないか。
+ *    ノンブロッキングなので待っても固まらない）。
  *  - **`cdk_sd_lock()` を転送の間ずっと握らない。** CoreS3 は LCD の DC と
  *    SD の MISO が同じ G35 なので、握っている間は画面が出せない。
  *    1 回の read/write ごとに取る。
@@ -75,6 +77,11 @@ static char s_tmp[208];
 /* 送信の終端手続きはどこまで進んだか。EAGAIN で戻るので覚えておく。 */
 typedef enum { FIN_NUL = 0, FIN_ACK, FIN_EOF, FIN_WAIT_EOF, FIN_WAIT_CLOSED } fin_t;
 static fin_t s_fin;
+
+/* 受信の仕上げはどこまで進んだか（終端の確認 → 続きが無いかの確認 → rename）。 */
+typedef enum { RFIN_STATUS = 0, RFIN_TAIL, RFIN_DONE } rfin_t;
+static rfin_t   s_rfin;
+static uint32_t s_tail_since;
 
 /* 1 チャンクの読みかけ。送信は fread した分を送り切るまで持つ。 */
 static uint32_t s_pend;    /* s_buf に入っているバイト数 */
@@ -207,6 +214,7 @@ esp_err_t cdk_scp_start(bool upload, const char *local, const char *remote,
     s_pend = 0;
     s_pend_at = 0;
     s_fin = FIN_NUL;
+    s_rfin = RFIN_STATUS;
     s_ch = NULL;
     s_fp = NULL;
     s_why[0] = '\0';
@@ -229,11 +237,9 @@ esp_err_t cdk_scp_start(bool upload, const char *local, const char *remote,
             snprintf(why, why_cap, "ディレクトリは送れません（1 本だけ）");
             return ESP_ERR_INVALID_ARG;
         }
-        if ((uint32_t)st.st_size > CDK_SCP_MAX_BYTES) {
-            snprintf(why, why_cap, "大きすぎます（上限 %uKB）",
-                     (unsigned)(CDK_SCP_MAX_BYTES / 1024u));
-            return ESP_ERR_INVALID_SIZE;
-        }
+        /* **符号なしで読み直す。** off_t は 32 ビットの long なので、FAT の
+         * 2GB〜4GB のファイルは負で返る（FAT の上限は 4GB なので、
+         * 32 ビットに収まることは保証されている）。 */
         s_total = (uint32_t)st.st_size;
     }
 
@@ -306,12 +312,8 @@ static void pump_open(void)
                 s_ch = NULL;
                 return;
             }
-            if ((uint32_t)sb.st_size > CDK_SCP_MAX_BYTES) {
-                snprintf(s_why, sizeof(s_why), "大きすぎます（上限 %uKB）",
-                         (unsigned)(CDK_SCP_MAX_BYTES / 1024u));
-                fail("大きすぎます");
-                return;
-            }
+            /* 符号なしで読み直す（2GB〜4GB は負で来る）。4GB 超は上が
+             * 落ちていて、ここでは分からない。FINISH の終端確認で断る。 */
             s_total = (uint32_t)sb.st_size;
         }
     }
@@ -427,6 +429,43 @@ static void pump_xfer(void)
 /* ---- FINISH ---- */
 static void pump_finish(void)
 {
+    if (!s_upload && s_rfin == RFIN_STATUS) {
+        /* **申告どおり読み終えたら、次は scp の終端（NUL 1 個）のはず。**
+         * 違うものが来たら、申告の大きさが 32 ビットに切られていた
+         * ＝相手のファイルは 4GB 超。中身の続きを終端と取り違えている。 */
+        char      c = 0;
+        const int r = (int)libssh2_channel_read(s_ch, &c, 1);
+        if (again(r)) {
+            return;
+        }
+        if (r == 1 && c != 0) {
+            snprintf(s_why, sizeof(s_why), "大きすぎます (4GB 超)");
+            fail("大きすぎます");
+            return;
+        }
+        /* NUL、または相手が閉じた（終端を送らない実装もある）。 */
+        s_rfin = RFIN_TAIL;
+        s_tail_since = now_ms();
+        return;
+    }
+    if (!s_upload && s_rfin == RFIN_TAIL) {
+        /* **NUL のあとに何も続かないことを確かめる。** 切られた申告が
+         * たまたま中身の 0 バイトで終わっていると、上の確認をすり抜ける
+         * （4GB 超の疎なファイルなら必ずそうなる）。正しい転送なら相手の
+         * scp は終端を送ってこちらの応答を待つので、ここでは何も来ない。 */
+        char      tail[16];
+        const int r = (int)libssh2_channel_read(s_ch, tail, sizeof(tail));
+        if (r > 0) {
+            snprintf(s_why, sizeof(s_why), "大きすぎます (4GB 超)");
+            fail("大きすぎます");
+            return;
+        }
+        if (again(r) && now_ms() - s_tail_since < CDK_SCP_TAIL_WAIT_MS) {
+            return;
+        }
+        s_rfin = RFIN_DONE; /* 来なかった / 相手が閉じた。仕上げへ */
+    }
+
     if (!s_upload) {
         /* 書き上がったものだけを最終名にする。
          * **FATFS の rename は上書きしないので先に消す。**

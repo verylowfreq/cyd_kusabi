@@ -927,7 +927,9 @@ static void scp_progress_line(void)
      * `draw_status` が「変わったときだけ描く」のと同じ理屈。 */
     static uint32_t last_ms;
     static uint32_t last_pct = 0xFFFFFFFFu;
-    const uint32_t  pct = (st.total > 0) ? (st.done * 100u / st.total) : 0u;
+    /* 64 ビットで掛ける。上限を外したので、32 ビットだと 43MB で溢れる。 */
+    const uint32_t  pct =
+        (st.total > 0) ? (uint32_t)((uint64_t)st.done * 100u / st.total) : 0u;
     const uint32_t  now = now_ms();
     if (pct == last_pct && now - last_ms < 300u) {
         return;
