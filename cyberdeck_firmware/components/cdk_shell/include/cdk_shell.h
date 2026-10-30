@@ -94,6 +94,18 @@ void cdk_shell_set_commands(cdk_shell_t *sh, const cdk_shell_cmd_t *cmds, size_t
  * 行は 1 字打つたびに上の段が残っていく。0 以下は「知らない」。 */
 void cdk_shell_set_cols(cdk_shell_t *sh, int cols);
 
+/* シェルを通さずに端末へ書くときは、前後をこの 2 つで囲む。
+ *
+ * 打ちかけの行をプロンプトごといったん消し、書き終えたら下に描き直す。
+ * 囲まずに書くと、知らせがプロンプトの後ろに続いてしまい、終わったあとに
+ * プロンプトも出ない。折り返した行だと、シェルが覚えている行の位置が
+ * ずれて描き直しを間違える。
+ *
+ * 書くものは行の頭から始めて、最後を改行で終えること。
+ * シェルが止まっている間（SSH・エディタ）は何もしない。 */
+void cdk_shell_hide_line(cdk_shell_t *sh);
+void cdk_shell_show_line(cdk_shell_t *sh);
+
 void cdk_shell_begin(cdk_shell_t *sh);
 
 /* シェルを止める（SSH に切り替えるときなど）。キーを無視するようになる。 */

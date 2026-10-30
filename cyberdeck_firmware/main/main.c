@@ -406,7 +406,10 @@ static void route_key(void *user, const cdk_key_t *k)
      * 止められない。 */
     if (cdk_retry_active(&s_retry)) {
         cdk_retry_stop(&s_retry);
+        /* シェルの行を避けて書く（プロンプトの後ろに続けない）。 */
+        cdk_shell_hide_line(&s_shell);
         term_printf("\033[33mssh   : 再接続をやめました\033[0m\r\n");
+        cdk_shell_show_line(&s_shell);
         s_dirty = true;
         return;
     }
@@ -2227,6 +2230,11 @@ void app_main(void)
         /* 再接続。**待っている間もシェルは普通に使える。**
          * 画面を占有して待たせると、設定を直すこともできない。 */
         if (cdk_retry_active(&s_retry) && cdk_retry_due(&s_retry, now_ms())) {
+            /* **待っている間はシェルが出ている。** 知らせ（と app_ssh_open
+             * が出すもの）をプロンプトの後ろに続けず、終わったらプロンプトを
+             * 出し直す。繋がったら enter_ssh がシェルを止めるので、show は
+             * 何もしない。 */
+            cdk_shell_hide_line(&s_shell);
             term_printf("\033[33mssh   : 再接続 %u 回目...\033[0m\r\n",
                         (unsigned)cdk_retry_next_attempt(&s_retry));
             /* **繋ぎ直しでは聞かない**（interactive = false）。人が見て
@@ -2242,6 +2250,7 @@ void app_main(void)
                                 "`ssh` でやり直せます\033[0m\r\n");
                 }
             }
+            cdk_shell_show_line(&s_shell);
         }
 
         /* ファイル転送。**別タスクではなくここで刻む。** 1 周で動かす量は

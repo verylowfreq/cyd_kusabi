@@ -1135,6 +1135,53 @@ int main(void)
         T_EQ_INT(TERM.cx, 2);
     }
 
+    T_CASE("外から書くとき: プロンプトの後ろに続けず、終わったら出し直す");
+    {
+        /* 再接続の知らせ（main.c が term_printf で直に書く）。前は
+         * `$ ssh   : 再接続 1 回目...` と続いて、プロンプトが消えたままだった。 */
+        term_setup();
+        cdk_shell_hide_line(&SH);
+        cdk_term_feed(&TERM, "msg1\r\n", 6);
+        cdk_term_feed(&TERM, "msg2\r\n", 6);
+        cdk_shell_show_line(&SH);
+        eq_row(0, "msg1");
+        eq_row(1, "msg2");
+        eq_row(2, "$");
+        T_EQ_INT(TERM.cy, 2);
+        T_EQ_INT(TERM.cx, 2);
+    }
+
+    T_CASE("外から書くとき: 折り返した打ちかけの行も全段どけて、下に描き直す");
+    {
+        term_setup();
+        type("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        key(CDK_K_NONE, CDK_MOD_CTRL_BIT, 'a');
+        cdk_shell_hide_line(&SH);
+        cdk_term_feed(&TERM, "msg\r\n", 5);
+        cdk_shell_show_line(&SH);
+        eq_row(0, "msg");
+        eq_row(1, p18);
+        eq_row(2, a12);
+        eq_row(3, "");
+        T_EQ_INT(TERM.cy, 1);
+        T_EQ_INT(TERM.cx, 2); /* カーソルの位置も保つ */
+        type("X"); /* そのあとの描き直しも正しい段から */
+        eq_row(1, "$ Xaaaaaaaaaaaaaaaaa");
+        eq_row(2, "aaaaaaaaaaaaa");
+        eq_row(3, "");
+    }
+
+    T_CASE("外から書くとき: シェルが止まっていれば何もしない");
+    {
+        term_setup();
+        cdk_shell_end(&SH);
+        OUTLEN = 0;
+        cdk_term_feed(&TERM, "\033[2J\033[H", 7);
+        cdk_shell_hide_line(&SH);
+        cdk_shell_show_line(&SH);
+        eq_row(0, ""); /* SSH の画面にプロンプトを描かない */
+    }
+
     T_CASE("折り返し: 画面の最下段で折り返して流れても戻れる");
     {
         term_setup();

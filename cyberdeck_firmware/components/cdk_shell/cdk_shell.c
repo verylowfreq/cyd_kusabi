@@ -1011,10 +1011,30 @@ void cdk_shell_notify(cdk_shell_t *sh, const char *s)
     if (!sh->active || s == NULL) {
         return;
     }
-    /* 折り返した行なら全段を消してから書く（上の段が知らせの上に残る）。 */
-    erase_drawn(sh);
+    cdk_shell_hide_line(sh);
     emit(sh, s, strlen(s));
     emit(sh, "\r\n", 2);
+    cdk_shell_show_line(sh);
+}
+
+void cdk_shell_hide_line(cdk_shell_t *sh)
+{
+    if (!sh->active) {
+        return;
+    }
+    /* 折り返した行なら全段を消す（上の段が知らせの上に残る）。 */
+    erase_drawn(sh);
+}
+
+void cdk_shell_show_line(cdk_shell_t *sh)
+{
+    if (!sh->active) {
+        return;
+    }
+    /* 外から書かれたぶんカーソルは動いている。前の形はもう当てにならない
+     * （hide で消してあるので、今いる段から新しく描けばよい）。 */
+    sh->drawn_cur_row = 0;
+    sh->drawn_end_row = 0;
     redraw(sh);
 }
 
