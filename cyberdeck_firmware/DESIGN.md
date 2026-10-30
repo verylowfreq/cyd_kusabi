@@ -3,7 +3,7 @@
 ABOUT.md の要求を実装可能な形に落としたもの。**この文書が実装の唯一の正**とし、
 決定が変わったらここを更新する。
 
-最終更新: 2026-08-27
+最終更新: 2026-10-31
 
 ---
 
@@ -38,6 +38,8 @@ ABOUT.md の「決めてほしいこと」と、2026-08-27 のヒアリングで
 +---------------------------------------------------+ y=320
 ```
 
+> **2026-08-29:** 帯は余りの 8px ではなく端末の 1 行を使う。既定は出さない（§13 M7「ステータス帯」）。
+
 試作機 CoreS3 は 320x240 なので同じフォントで **53桁 x 20行**。
 桁数はコンパイル時定数ではなく実行時にパネル寸法から算出する（両方で同じバイナリ設計が動くこと）。
 
@@ -71,12 +73,19 @@ ABOUT.md 「パソコン上で検証できるところは積極的にパソコ�
 ```
 cyberdeck_firmware/
 ├── CMakeLists.txt              # ESP-IDF プロジェクト
-├── sdkconfig.defaults
+├── sdkconfig.defaults          # 共通。基板ごとの差分は .cores3 / .v1
 ├── partitions.csv
 ├── DESIGN.md                   # この文書
 ├── main/
-│   ├── CMakeLists.txt
-│   └── main.c                  # 起動・タスク構成のみ。ロジックを置かない
+│   ├── main.c                  # 起動・メインループ・route_key・セッション切り替え
+│   ├── app.h                   # main.c とコマンドの間の取り決め
+│   ├── cdk_commands.c          # シェルのコマンド（wifi / ssh / scp / gpio / i2c ...）
+│   ├── cdk_fscmds.c            # ファイル系（ls / cat / cp / mkdir ...）
+│   ├── cdk_skkcmds.c           # skk / skkdict
+│   ├── cdk_editcmds.c          # edit
+│   ├── cdk_wasmcmds.c          # wasm
+│   ├── cdk_pushfile.c          # cdk.py push（PC → microSD）
+│   └── secrets.h               # .env から生成。gitignore（§8.1）
 ├── components/                 # ── 純 C コア（ホストでもビルドする）──
 │   ├── cdk_proto/              # ホストPC↔デバイスの制御フレーミング       [M0]
 │   ├── cdk_text/               # UTF-8 / 東アジア文字幅                     [M1]
@@ -87,28 +96,44 @@ cyberdeck_firmware/
 │   ├── cdk_screen/             # セルグリッド → キャンバス描画              [M1]
 │   ├── cdk_shell/              # コマンドラインパーサ + 組み込みコマンド    [M3]
 │   ├── cdk_skk/                # SKK エンジン + 辞書リーダ + 個人辞書       [M5]
-│   └── cdk_edit/               # テキストエディタ（折り返し・移動・編集）   [M6]
+│   ├── cdk_edit/               # テキストエディタ（折り返し・移動・編集）   [M6]
+│   ├── cdk_hid/                # USB HID ブートキーボードのレポート → キー  [M7]
+│   ├── cdk_status/             # ステータス帯の文字列                       [M7]
+│   ├── cdk_retry/              # 再接続の指数バックオフ                     [M7]
+│   ├── cdk_sshkey/             # OpenSSH 形式の公開鍵行・指紋               [M7]
+│   └── cdk_wasm/               # ユーザーアプリ ABI の中身                  [M8]
 ├── components_port/            # ── ESP-IDF 依存の薄いポート層 ──
 │   ├── port_display/           # esp_lcd + BSP、キャンバスをパネルへ転送    [M0]
-│   ├── port_link/              # cdk_proto を USB-Serial-JTAG に載せる      [M0]
+│   ├── port_link/              # cdk_proto を USB-Serial-JTAG / UART1 に載せる [M0]
 │   ├── port_usbhid/            # USB HID ホスト → レポート                 [M7]
-│   ├── port_net/               # WiFi + SSH クライアント                    [M2]
+│   ├── port_net/               # WiFi + SSH / scp / wget                    [M2]
 │   ├── port_board/             # 基板ごとのピンと能力（cdk_board.h）       [M6]
 │   ├── port_skk/               # 辞書をフラッシュ/SD から読む口             [M5]
 │   ├── port_spibus/            # SPI3 の所有権と G35 の役割切り替え         [M4]
 │   ├── port_storage/           # microSD (FATFS)                            [M4]
 │   ├── port_cfg/               # NVS（設定・認証情報）                      [M3]
-│   └── port_periph/            # GPIO/I2C/ADC/UART の実操作                 [M3]
+│   ├── port_periph/            # GPIO/I2C/ADC/UART の実操作                 [M3]
+│   ├── port_wasm/              # wasm3 で .wasm を専用タスクで走らせる      [M8]
+│   ├── libssh2/                # libssh2 1.11.1（upstream/ は手を入れない） [M2]
+│   └── wasm3/                  # wasm3（upstream/ は手を入れない）          [M8]
 ├── host/                       # ── ホスト側ビルド ──
-│   ├── CMakeLists.txt          # components/ をそのまま取り込む
+│   ├── CMakeLists.txt          # components/ と、port_wasm の VM 部分 + wasm3 を取り込む
 │   ├── tests/                  # ユニットテスト（ctest）
 │   ├── tools/cdk_render.c      # 基準レンダラ（実機の検証にも使う）
-│   └── fixtures/vt/            # VT フィクスチャ。実機とホストが同じものを描く
+│   ├── tools/skk_probe.c       # 辞書バイナリを実機と同じコードで引く
+│   └── fixtures/               # vt/（実機とホストが同じものを描く）・skk/・wasm/
+├── wasm-sdk/                   # ユーザーアプリの SDK（C: include/ src/、Rust: rust/） [M8]
+├── wasm-apps/                  # C のサンプルアプリ                         [M8]
 └── tools/                      # ── PC 側スクリプト（Python）──
     ├── cdk.py                  # デバイス制御 CLI（後述）
+    ├── gen_secrets.py          # .env → main/secrets.h
     ├── mkfont.py               # 東雲BDF → フォントブロブ
     ├── skk_build.py            # SKK-JISYO.* → バイナリ辞書   [M5]
-    └── check_board_pins.py     # ピン定義と HARDWARE_DESIGN.md の突き合わせ
+    ├── check_board_pins.py     # ピン定義と HARDWARE_DESIGN.md の突き合わせ
+    ├── check_banner_width.py   # 起動バナーが画面の桁数に収まるか
+    ├── wasmcc.py               # C のアプリ → .wasm           [M8]
+    ├── wasmrs.py               # Rust のアプリ → .wasm        [M8]
+    └── wasminfo.py             # .wasm がファームに載る形か見る [M8]
 ```
 
 ビルド入口は 2 つ:
@@ -133,7 +158,7 @@ ABOUT.md の「AIエージェントが自律的にコーディング、実行、
 `tools/cdk.py` に**タイムアウトとセンチネル付き**のシリアルリーダを実装する。
 
 ```
-python tools/cdk.py flash             # ビルド + 書き込み + リセット
+python tools/cdk.py flash             # 書き込み + リセット（ビルドは cdk.py build）
 python tools/cdk.py log --timeout 10  # 10秒 or センチネルまで読んで終了
 python tools/cdk.py boot              # リセットして起動ログを取り、READY 到達で終了
 ```
@@ -149,7 +174,7 @@ python tools/cdk.py key f1
 ```
 
 ファーム側では「シリアルから来たキーイベント」と「USB キーボードから来たキーイベント」を
-`cdk_key_event_t` に正規化して同じ経路に流す。試作機で書いたテストが実機でもそのまま通る。
+`cdk_key_t` に正規化して同じ経路に流す。試作機で書いたテストが実機でもそのまま通る。
 
 ### 3.3 スクリーンショット
 
@@ -200,6 +225,9 @@ DTR/RTS の使い方が別）。取り違えると症状が「起動ログが出
 
 CH340 を繋げない状況のために **1 チャネル縮退モード**も持つ（`CDK_LINK_SINGLE`）。
 そのときは CTRL と LOG が COM22 に同居する。フレーム形式は縮退モード前提で設計しておく:
+
+> **2026-10-31:** 縮退モードは作っていない。フレーム形式に `CDK_MSG_LOG` (0x04) の枠を
+> 残してあるだけで、`CDK_LINK_SINGLE` の切り替えは無い。ログ用の変換器は FT232 になった。
 
 ```
 magic(4) = 0x1B 'C' 'D' 'K'   ESC で始めるのでテキスト行として解釈されない
@@ -372,8 +400,8 @@ ABOUT.md のリストをそのまま実装可能な粒度に展開したもの�
 | スクロール | `DECSTBM` (`CSI r`), `SU` / `SD` (`CSI S` / `CSI T`), `RI` (`ESC M`) |
 | スクロールバック | 200 行。`Shift+PgUp` / `PgDn` で遡る。`CSI 3J` で消す（§6.5） |
 | モード | `DECTCEM`(25: カーソル表示), `1049` / `47`（代替画面）, `2004`（bracketed paste）, `1000` / `1002` / `1006`（マウス。**受理して無視**） |
-| 問い合わせ | `DA` (`CSI c` → `ESC[?6c`), `DSR` (`CSI 6n` → カーソル位置) |
-| OSC | `0` / `2`（タイトル → ステータス帯に出す）。それ以外は読み捨て |
+| 問い合わせ | `DA` (`CSI c` → `ESC[?62;22c`), `DSR` (`CSI 6n` → カーソル位置) |
+| OSC | `0` / `2`（タイトルは `t->title` に持つだけ。帯には出していない）。それ以外は読み捨て |
 | 文字集合 | `ESC ( B` のみ受理。DEC 特殊グラフィクス `ESC ( 0` は罫線にマップ |
 
 **省略するもの**: DCS / Sixel、ReGIS、ソフトフォント (DECDLD)、二重幅行 (DECDWL)、
@@ -410,6 +438,9 @@ host/fixtures/vt/NNN_name.txt   # 期待するグリッド（テキスト + 属�
 ```
 
 `vttest` の出力や実際の `claude` / `codex` CLI のログを流し込んで回帰させる。
+
+> **2026-10-31:** この形式と CLI ログの回帰は作っていない。`host/fixtures/vt/` にあるのは
+> `banner.vt` / `banner40.vt` / `preedit_nihon.txt` だけで、VT の検査は `test_term` などの中に書いている。
 
 同じフィクスチャを実機の検証にも使う（M1 で実装済み）。
 
@@ -584,7 +615,7 @@ typedef struct {
     uint16_t keycode;   // HID usage 相当
     uint8_t  mods;      // ctrl / shift / alt / gui
     uint32_t codepoint; // 文字が確定するなら Unicode、無ければ 0
-} cdk_key_event_t;
+} cdk_key_t;
 ```
 
 入力源（シリアル注入 / USB HID / 将来の BLE）はすべてこの型に正規化してキューへ。
@@ -624,7 +655,7 @@ US 配列と JIS 配列の両方の変換表を持ち、実行時に切り替え
 
 ### 8.1 WiFi
 
-`esp_wifi` STA モード。認証情報は NVS に保存し、シェルの `wifi` コマンドで設定。
+`esp_wifi` STA モード。認証情報は NVS に保存し、シェルの `set wifi.ssid` / `set wifi.psk` で設定する。
 **ソースにも sdkconfig にも書かない。** 開発用のテスト値は gitignore した `.env` に置き、
 `tools/gen_secrets.py` が作る `secrets.h`（これも gitignore）を初回の種にする
 （§13 M3「認証情報」）。値がリポジトリに入るのは `.env` を追跡したときだけ。
@@ -749,6 +780,8 @@ GPLv3 の許容は不要になった（libssh2 は BSD-3-Clause）。
 #### M2 で実装するもの
 
 - 鍵交換 `curve25519-sha256`、ホスト鍵 `ssh-ed25519` / `rsa-sha2-256`
+  > **2026-10-31:** mbedTLS バックエンドでは ed25519 が使えない（`LIBSSH2_ED25519` = 0。§13 M7「公開鍵認証」）。
+  > ホスト鍵は `rsa-sha2-256` / `ecdsa-sha2-nistp256` など（ECDSA は `CONFIG_MBEDTLS_ECDSA_C=y` で有効）。
 - 暗号 `aes128-ctr`（ESP32-S3 のハード AES が効く）/ `chacha20-poly1305`
 - `libssh2_channel_request_pty_ex()` に `cdk_term` の実際の `cols` / `rows` を渡す。
   **80x26 ではなく試作機の 53x20。** 固定値を書かないこと。
@@ -1332,6 +1365,7 @@ python tools/cdk.py dict SKK-JISYO.L.unannotated --build-only  # 大きさだけ
 | `cdk_skk_romkana.c` | ローマ字 → かな の表と状態機械。カナ / 半角カナ / 全角英数への変換 |
 | `cdk_skk_dict.c` | 辞書バイナリの二分探索、候補列の切り出し |
 | `cdk_skk.c` | モードと ▽ / ▼ の状態機械 |
+| `cdk_skk_user.c` | 個人辞書（`user.dic` の読み込みと追記） |
 
 **促音は表に直接書く。** `"kk" → っ + 打ち直し "k"`。規則で書こうとすると
 「n は重ねても っ にならない」「ch は tch」といった例外が条件分岐で並ぶ。
@@ -1502,31 +1536,36 @@ ssh   : ... に届きません
 | 切れた直後にキー | ✅ `再接続をやめました` のあとに `$ ` が出直す |
 | 8 回失敗して諦める | 未確認（同じ囲みの中。ホストテストで `hide`→書く→`show` の段を確認） |
 
-### 実装済み (M4 時点)
+### 実装済み (2026-10-31)
 
 ```
 help  echo  clear  history  free  info  reboot
-wifi [connect]           WiFi の状態 / 再接続
-ssh [user@host|close|forget]
+wifi [connect|off]       WiFi の状態 / 繋ぎ直し / 止める
+ssh [user@host|close|forget|key|keygen]
                          接続（引数なしは NVS または secrets.h の相手）
                          forget = その場で打ったパスワードを忘れる [§8.5]
+                         key / keygen = 公開鍵の表示 / 作成 [M7]
+scp <手元> user@host:<パス>   送る（逆に書けば取る） [§8.4]
 hostkey [forget]         SSH ホスト鍵の検証状態 / known_hosts の削除
 set <key> [value]        NVS の設定。パスワードは伏せる
 sd [mount|unmount]       microSD の状態と容量
 ls [dir]  cat <f>  rm <f>  mkdir <dir>
 sdtest                   SD に書いて読み戻す
+edit <file>              テキストエディタ [M6]
+skk on|off|kata          かな入力 [M5]
+skkdict <見出し>          辞書を引く
 gpio mode|set|get <pin>  予約ピンは名前つきで弾く
-i2c scan|read|write
+i2c scan <sda> <scl>     I2C の走査
 adc read <ch>
 wasm run|ls|info         ユーザーアプリ (.wasm)。止めるのは Ctrl-C  [M8]
 uart [速度] [--flow]     外部 UART の端末。戻るのは Ctrl-] q
 wget <URL> [名前]        HTTP / HTTPS で 1 本取る。止めるのは Ctrl-C
 ```
 
-未実装: `cp` `mv` `df` `pwm` `wifi scan` `shot` の SD 保存。
+未実装: `cp` `mv` `df` `pwm` `wifi scan` `shot` の SD 保存、シェルからの `i2c read` / `write`
+（読み書きは wasm アプリから）。
 `uart` は端末だけで、`uart open <tx> <rx>`（ピン指定）と
 `uart send <hex|str>`（ワンショット送信）は入れていない。
-`ssh <user>@<host>` の引数指定もまだで、いまは設定に入っている 1 か所へ繋ぐだけ。
 
 ### シリアル端末 — `uart` (2026-09-12)
 
@@ -1855,7 +1894,7 @@ CONNECTION_TIMEOUT` = 0）に写すので、`esp_http_client_read` は EAGAIN �
 CoreS3 の microSD は LCD と SPI バスを共有する。同一バスの排他制御が要る
 （`esp_lcd` の SPI と `sdspi` を同じホストに載せ、トランザクション単位で共存させる）。
 **LCD 転送中に SD アクセスが割り込むと画面が壊れる**ので、
-キャンバス転送タスクと SD アクセスをミューテックスで直列化する。
+メインループのキャンバス転送と SD アクセスを `cdk_sd_lock` / `cdk_sd_unlock` で直列化する。
 
 さらに CoreS3 では **LCD の DC と SD の MISO が同じ G35**。排他だけでは足りず、
 所有者が変わるたびにピンの向きを切り替える必要がある（`port_spibus`）。
@@ -1881,18 +1920,16 @@ LCD 側は出力、SD 側は入力。再帰ミューテックスにしてある�
 パーティション（16MB）。`gen_esp32part.py --flash-size 16MB` で検証済み:
 
 ```
-# Name,   Type, SubType, Offset,  Size
-nvs,      data, nvs,     ,        24K     # 0x009000
-phy_init, data, phy,     ,        4K      # 0x00f000
-factory,  app,  factory, ,        4M      # 0x010000
-skkdict,  data, 0x40,    ,        4M      # 0x410000
-storage,  data, fat,     ,        4M      # 0x810000
-                                          # 0xc10000 以降 約4MB 空き
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     ,         24K     # 0x009000
+phy_init,   data, phy,     ,         4K      # 0x00f000
+factory,    app,  factory, 0x010000, 4M
+skkdict,    data, 0x40,    0x410000, 8M
+storage,    data, fat,     0xC10000, 4032K
 ```
 
-`skkdict` は SD 無しでも SKK が使えるようにするための予備領域。
-SD が本命なので、不要なら削って `storage` か OTA に回せる（M5 までに判断すれば良い）。
-OTA は当面不要（`factory` 単独）。必要になったら空き 4MB を `ota_1` にする。
+~~`skkdict` は 4M の予備領域、空き 4MB を `ota_1` に~~ → **M5 で `skkdict` を 8MB に決めた**
+（SKK-JISYO.L 全体がバイナリで約 6.5MB。§9.1）。空きは無いので、OTA を入れるなら `storage` を削る。
 
 ---
 
@@ -1905,14 +1942,14 @@ ABOUT.md 「実装困難・不能な箇所についての指摘と代替案」�
 | 1 | **80桁の確保** | 480x320 で 8px フォントだと 60桁しか出ず CLI の UI が崩れる | 東雲 12px（半角 6x12）を採用して 80桁 x 26行 を確保。**解決済み** |
 | 2 | **26行しか無い**（スクロールバックで**あふれた分は遡れる**ようになった。§6.5） | Claude Code / Codex CLI は縦にも長い。ページャや差分表示が窮屈 | 回避不能。SSH 側に `LINES=26` を正しく伝え、CLI 側の折返しに任せる。フォント 12px 固定のまま縦だけ稼ぐ手段は無い |
 | 3 | **USB ホストと USB コンソールの排他** | 最終ハードで USB キーボードを挿すと USB 経由のログが取れない | UART をデバッグ用に常設。試作機は USB デバイスのまま |
-| 4 | **Nerd Font / Powerline / 絵文字** | 今どきの CLI プロンプトが化ける | 近似 ASCII 置換テーブル + 幅計算だけは正しく行う。表示は諦める |
-| 5 | **SSH ライブラリが ESP-IDF で素直に組めない可能性** | プロジェクトの根幹 | wolfSSH を第一候補（GPLv3 は許容と判断済み）、libssh2 を第二候補。M2 冒頭でスパイクして早期に判定 |
+| 4 | **Nerd Font / Powerline / 絵文字** | 今どきの CLI プロンプトが化ける | 幅計算だけは正しく行い、表示はげた（§5.4）。置換テーブルは作っていない |
+| 5 | **SSH ライブラリが ESP-IDF で素直に組めない可能性** | プロジェクトの根幹 | ✅ 解決。libssh2 1.11.1 + mbedTLS に決めた（§8.2） |
 | 6 | **SKK-JISYO.L が実機で扱えない** | 変換不能 | PC 上でバイナリ索引化し、SD から二分探索。RAM 一定 |
 | 7 | **LCD と microSD の SPI バス共有 (CoreS3)** | 画面破壊・SD エラー | ✅ M4 で解決。`port_spibus` が再帰ミューテックスで直列化し、**G35 の向きも切り替える**（LCD DC は出力 / SD MISO は入力）。最終ハードでは SD を SDMMC で別バスにする設計を推奨 |
 | 8 | **SPI 液晶のリードバック不可** | スクリーンショットが取れない | PSRAM キャンバスを真実とし、描画を必ず経由させてダンプ |
-| 9 | **フル画面書き換え時の SPI 帯域** | スクロールが遅い | 行ダーティ管理 + ハードウェア縦スクロール（`DECSTBM` を `esp_lcd` の vertical scroll に対応付ける最適化を M1 後に検討） |
+| 9 | **フル画面書き換え時の SPI 帯域** | スクロールが遅い | 行ダーティ管理 + ハードウェア縦スクロール（`DECSTBM` を `esp_lcd` の vertical scroll に対応付ける最適化を M1 後に検討）。**未着手**（体感で困っていない） |
 | 10 | **truecolor → RGB565** | 色が丸まる | 仕様として許容。SGR は受理し最近傍に丸める |
-| 11 | **日本語 IME の候補表示領域** | 26行のうち 1〜2行を食う | 候補はステータス帯直上に 1 行のオーバーレイで出し、端末バッファは汚さない |
+| 11 | **日本語 IME の候補表示領域** | 26行のうち 1〜2行を食う | ✅ 未確定の文字列はカーソル位置に反転で重ねる（`cdk_screen_set_preedit`。§9.2）。候補一覧は出さず 1 つずつ送る。端末バッファは汚さない |
 | 12 | ~~**ABOUT.md に生の PSK / SSH パスワードがコミットされている**~~ | 資格情報の漏洩 | ✅ 解決。値は gitignore した `.env` へ移し（2026-08-27）、履歴からも `git filter-repo` で消した（2026-09-01）。2026-10-30 に全コミットで残っていないことを確認（§8.1） |
 | 13 | **ユーザーアプリの無限ループが止められない** | `wasm run` したアプリが native を一度も呼ばずに回ると Ctrl-C が届かない | wasm3 の構造上の限界。native の入口では必ず止まるので、`sys_delay` や `con_write` を挟むアプリは止まる。止まらなければ `reboot`。マニュアルにもそう書いた（§15.5） |
 | 14 | **予約ピンの表が試作機のものしか無かった** | v1 で `gpio set 12` が画面を殺し、`gpio set 15` が制御チャネルを殺す。逆に Grove の I2C が使えない | ✅ M8 で解決。`cdk_board.h` を唯一の出どころにして表を基板ごとに分けた（§15.12） |
@@ -2202,7 +2239,7 @@ CoreS3 は空きピンが少ない。LCD / SD / 内蔵 I2C / USB / ログ UART /
   変換され、`ls` が「ｌｓ」になって何も打てない。実機で気づいた。
   モードをセッションごとに持つようにした。
 
-### M7 — 最終ハード移行
+### M7 — 最終ハード移行 ✅ 完了 (2026-08-29)
 
 - USB HID ホスト、UART コンソール、480x320 パネル、電源
 
@@ -2232,13 +2269,16 @@ PSRAM 設定が残る。`cdk.py build --board` が `.cdk_board` を見て自動�
 機能の有無は `CDK_BOARD_HAS_*` で **0/1 を必ず定義する**。`#ifdef` にすると、
 綴りを間違えたときに黙って「機能なし」に倒れる。
 
-ポート層で基板ごとに分かれているのは 3 か所だけ:
+ポート層で基板ごとに分かれているのは次のとおり（2026-10-31 に洗い直した）:
 
 | ファイル | 違い |
 |---|---|
 | `port_spibus` | CoreS3 だけ G35 の向きを切り替える。v1 は別バスなのでロックだけ |
 | `port_display` | CoreS3 は BSP + エンディアン入れ替え。v1 は ILI9488 を SPI2 で直接 |
 | `port_storage` | CoreS3 は BSP。v1 は SPI3 に sdspi を自分で立てる |
+| `port_link` | CoreS3 は USB-Serial-JTAG。v1 は UART1 |
+| `port_periph` | 予約ピンの表、電池電圧（v1 のみ）、内蔵 I2C を BSP が握るか |
+| `port_usbhid` | USB ホストがある基板（v1）だけ |
 
 **ピン番号は 2 か所（HARDWARE_DESIGN.md と `cdk_board.h`）にある。**
 片方だけ直すと、基板は正しいのにファームが別のピンを叩くという、実機でしか
@@ -2272,11 +2312,11 @@ CoreS3 とは転送前の処理が違うだけで、帯の切り出しとダー�
 
 桁数・行数を持っている側を洗うこと。
 
-- [ ] `cdk_edit_set_size()` は `edit` を開くときにしか呼んでいない。
-      画面の大きさが動く可能性が出たら、変わったときに呼び直す口が要る。
-- [ ] `cdk_ssh_resize()` は API があるだけで**呼ぶ側がまだ無い**（M2 からの残件）。
-- [ ] `banner.vt` の基準画像は 320x240 で作ってある。`selftest` の比較を
-      新しい寸法でやり直す。
+- [~] `cdk_edit_set_size()` は `edit` を開くときにしか呼んでいない。
+      → 画面の大きさは再起動でしか変わらない作りにしたので不要（下の「再起動が要る」）。
+- [~] `cdk_ssh_resize()` は API があるだけで呼ぶ側が無い → 同じ理由で不要。
+- [x] `banner.vt` の基準画像は 320x240 で作ってある → `cdk_render vt` が `SHOT_INFO` の
+      寸法で描くようにしたので、v1 の `selftest` も一致する。
 - [x] ステータス帯 — 作った（下の「ステータス帯」）。**ただし §0 の
       「余りの 8px」ではなく 1 行使う**。理由はそこに書いた。
 
@@ -2417,7 +2457,8 @@ JIS にしか無い usage (0x87 ろ / 0x89 ￥ など) が来たら警告を出�
 192.168.1.97 あ SD14G KBD
 ```
 
-出すもの: IP / SSH / かな入力の状態 / SD / USB キーボード / 電池。
+出すもの: IP（繋いでいる間は `WiFi接続中`）/ SSH / かな入力の状態 / SD / USB キーボード /
+`uart` の速度とフロー制御 / 電池。スクロールバックを遡っている間は先頭に `^n`。
 入りきらない項目は**後ろから丸ごと落とす**（途中でちょん切ると
 `192.168.1.9` が別のアドレスに見える）。桁数は `cdk_char_width` で数える。
 バイト数で数えると日本語が入った瞬間にずれる（#21 と同じ壊れ方）。
@@ -2567,6 +2608,8 @@ ssh-keygen -l : 256 SHA256:EdkLEb+mPmDNjBfDGEJepj/qLS332bvGM0UfRA/ZLAc (ECDSA)
 > **中止（キー入力で止める）は実機で通していない。** 相手が生きていると
 > 1 回目で繋がってしまい、止める隙が無い。状態機械はホストテストで
 > 見ているが、結線は目視のみ。
+>
+> **2026-10-30:** v1 で確認した（§10「hide_line / show_line」の表。切れた直後にキー → `再接続をやめました`）。
 
 ---
 
@@ -2895,7 +2938,7 @@ python tools/wasmcc.py --all
 自由形式 (`-nostdlib`) なので libc が無い。`memcpy` / `memset` などは
 `wasm-sdk/src/cdk_app.c` が自前で持つ。**使っていなくても要る**（clang が
 構造体のコピーや配列の初期化で勝手に呼ぶ）。`cdk_printf` は
-`%d %u %x %c %s %%` だけ。確保は解放しないバンプ (`cdk_alloc`)。
+`%d %u %x %X %c %s %%` だけ。確保は解放しないバンプ (`cdk_alloc`)。
 
 同じ ABI の Rust 版が `wasm-sdk/rust/` にある（§15.14）。
 **当ててみたらファーム側も 2 か所直すことになった**ので、
@@ -2948,7 +2991,7 @@ DEV_STATS の #13 / #14 と同じ。**シェルのヒアドキュメント経由
 ### 15.13 完了条件と検証
 
 ```
-ctest --test-dir build-host --output-on-failure   # 26 スイート
+ctest --test-dir build-host --output-on-failure   # 27 スイート（M8 時点は 26）
 python tools/cdk.py selftest                      # 基準画像と一致
 ```
 
@@ -3022,7 +3065,7 @@ C 版と同じで、**ABI を知っているのは 1 ファイルだけ**（`cdk
 実機でしか出ないうえに原因の切り分けにくい壊れ方をする。
 
 > **空集合どうしで一致しないようにしてある。** 突き合わせる前に 3 か所
-> それぞれで 45 個以上あることを確かめる。`wasm_natives_checked` が
+> それぞれで 46 個以上（`i2c_probe` を足して 45 → 46）あることを確かめる。`wasm_natives_checked` が
 > 「0 個 対 0 個」で通っていた前例があるため。名前を 1 個消したときと、
 > 正規表現を壊して 0 件にしたときの両方で落ちることを確認済み。
 
@@ -3143,6 +3186,8 @@ CoreS3 でもビルドが通ることを確認済み（`port_link` の直しが
 - 専用フラッシュパーティション（`partitions.csv` は触っていない）
 - **UART は実機のデバイスで未検証。** 繋ぐものが手元に無く、ピンの拒否と
   `uart_open` までしか確かめていない。
+  > **2026-09-12:** `cdk_uart_*` はシェルの `uart` で折り返し検証済み（§10）。
+  > wasm 経由（`uartecho.wasm`）は未検証のまま。
   （I2C は M5Stack Unit ENV III（SHT30 + QMP6988）を Grove の G17/G18 に
   繋いで検証済み。走査・温湿度の読み出し・走査後にもう一度読めることまで
   確かめた。そこで見つけた 2 つのバグは §12 の 16 と 17。）

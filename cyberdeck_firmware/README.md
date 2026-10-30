@@ -18,10 +18,11 @@ ESP32-S3 サイバーデックのファームウェア。設計は [DESIGN.md](D
   公開鍵認証 / SSH 再接続
 - M8: **WebAssembly ユーザーアプリ**。`wasm run` で `.wasm` を走らせる。
   WASI でも POSIX 互換でもない独自 ABI（コンソール / ファイル / GPIO / ADC /
-  I2C / UART / TCP・UDP）。焼き直さずに機能を足せる。
+  I2C / UART / TCP・UDP / TLS）。焼き直さずに機能を足せる。
   SDK は **C と Rust の両方**（`wasm-sdk/` と `wasm-sdk/rust/`）
 
-加えて **ターミナルのスクロールバック 200 行**（`Shift+PgUp`。DESIGN.md §6.5）。
+加えて **ターミナルのスクロールバック 200 行**（`Shift+PgUp`。DESIGN.md §6.5）、
+`scp`（Windows の OpenSSH にも）、`wget`（HTTP / HTTPS）、シリアル端末 `uart`。
 
 残件と「やらないこと」は DESIGN.md §13 / §15.15 を参照。
 
@@ -29,20 +30,28 @@ ESP32-S3 サイバーデックのファームウェア。設計は [DESIGN.md](D
 
 ## 前提
 
+場所と COM 番号は開発機の例。
+
 | もの | 場所 |
 |---|---|
 | ESP-IDF v5.5.5 | `C:\DATA-0\Espressif\esp-idf-v5.5.5` |
 | IDF の python (pyserial 入り) | `C:\DATA-0\Espressif\python_env\idf5.5_py3.14_env\Scripts\python.exe` |
-| clang | `C:\Program Files\LLVM\bin` |
+| clang / CMake / Ninja | `C:\Program Files\LLVM\bin` |
+| Python 3 | ホスト側テストの一部（`board_pins` など 4 件）と `tools/*.py` |
 | 試作機 M5Stack CoreS3 | 制御チャネル **COM22** (USB-Serial-JTAG) |
 | FT232 | ログチャネル **COM75** ← CoreS3 PORT.C (G17=TX / G18=RX / GND) |
 
 **v1 (最終ハード) はポートの乗り方が違う。** USB-Serial-JTAG が無いので、
 書き込みとログが UART0 (**COM76**)、制御チャネルが UART1 (**COM75**)。
-`cdk.py` は `.cdk_board` を見て自動で使い分けるので、普段は指定しなくてよい。
+`flash` / `boot` などは `.cdk_board` を見てポートを使い分ける。
+`.cdk_board` を書くのは `build --board`。省くと前回の基板を引き継ぐ（初回は `cores3`）。
 
-上書きするときは `--ctrl` / `--log` / `--prog`、または環境変数
-`CDK_CTRL` / `CDK_LOG` / `CDK_PROG`。
+上書きするときは `--ctrl` / `--log` / `--prog` を**サブコマンドの前**に置く
+（`cdk.py --prog COM5 flash`）か、環境変数 `CDK_CTRL` / `CDK_LOG` / `CDK_PROG`。
+
+**初回は `main/secrets.h` を作る。** リポジトリ直下の `.env`
+（`TEST_WIFI_SSID` などの 5 つ。値は空でもよい）から `python tools\gen_secrets.py` で生成する。
+無いとビルドが通らない（DESIGN.md §8.1）。
 
 ---
 
@@ -65,11 +74,11 @@ ctest --test-dir build-host --output-on-failure
 
 ## 実機
 
-PowerShell で ESP-IDF を有効化してからビルドする。
+PowerShell で ESP-IDF を有効化してから `cdk.py build` でビルドする。
+`idf.py build` 単体では基板ごとの `sdkconfig.defaults.<board>` が重ならないので使わない。
 
 ```powershell
 . C:\DATA-0\Espressif\esp-idf-v5.5.5\export.ps1
-idf.py build
 ```
 
 書き込みと動作確認は `tools/cdk.py`。**どのコマンドも必ず有限時間で終わる**
@@ -78,8 +87,9 @@ idf.py build
 ```powershell
 $py = "C:\DATA-0\Espressif\python_env\idf5.5_py3.14_env\Scripts\python.exe"
 
-& $py tools\cdk.py build                    # ビルド（既定 = 試作機 CoreS3）
 & $py tools\cdk.py build --board v1         # 最終ハード向け
+& $py tools\cdk.py build --board cores3     # 試作機
+& $py tools\cdk.py build                    # 前回の基板のまま（初回は cores3）
 & $py tools\cdk.py flash                    # ビルド済みバイナリを書き込む
 & $py tools\cdk.py boot                     # リセットして #CDK-READY まで待つ
 & $py tools\cdk.py log --timeout 5          # ログを 5 秒ぶん読む
@@ -88,8 +98,14 @@ $py = "C:\DATA-0\Espressif\python_env\idf5.5_py3.14_env\Scripts\python.exe"
 & $py tools\cdk.py shot out.png --verify-vt host\fixtures\vt\banner.vt
 & $py tools\cdk.py type "hello\n"           # テキストを入力として流す
 & $py tools\cdk.py key ctrl+c up f1         # キーイベントを送る
-& $py tools\cdk.py selftest                 # boot + ping + shot --verify
+& $py tools\cdk.py push app.wasm apps/app.wasm   # PC のファイルを microSD へ書く
+& $py tools\cdk.py vt host\fixtures\vt\banner.vt # 端末を初期化してバイト列を流す
+& $py tools\cdk.py cam out.jpg              # パネルをカメラで撮る
+& $py tools\cdk.py selftest                 # boot + ping + vt(banner) + shot --verify-vt
 ```
+
+`shot --verify` / `--verify-vt` と `selftest` は基準画像を `build-host/cdk_render` で描くので、
+先に上の「ホスト側」をビルドしておくこと。
 
 `selftest` が完了条件そのもの。緑なら、実機の画面と
 ホスト側で同じ純 C コードが描いた基準画像がバイト単位で一致している。
@@ -114,23 +130,33 @@ components/        ESP-IDF に依存しない純 C コア。ホストでもビ�
   cdk_shell/         行編集・履歴・補完・コマンド実行
   cdk_skk/           SKK 日本語入力（ローマ字かな・辞書・学習）
   cdk_edit/          テキストエディタ（折り返し・移動・編集）
+  cdk_hid/           USB HID ブートキーボードのレポート → キーイベント
+  cdk_status/        ステータス帯の文字列
+  cdk_retry/         再接続の指数バックオフ
+  cdk_sshkey/        OpenSSH 形式の公開鍵行・指紋
+  cdk_wasm/          ユーザーアプリ ABI の中身
 components_port/   ESP-IDF 依存の薄いポート層
-  port_display/      BSP + esp_lcd。キャンバスをパネルへ転送
-  port_link/         USB-Serial-JTAG の制御チャネル
+  port_board/        基板ごとのピンと能力（cdk_board.h）
+  port_display/      キャンバスをパネルへ転送（CoreS3: BSP / v1: ILI9488）
+  port_link/         制御チャネル（CoreS3: USB-Serial-JTAG / v1: UART1）
+  port_usbhid/       USB キーボード（v1）
   port_cfg/          NVS に置く設定（認証情報）
-  port_net/          WiFi + SSH クライアント + known_hosts 検証
-  port_periph/       GPIO / ADC / I2C
+  port_net/          WiFi + SSH クライアント + known_hosts 検証 + scp / wget
+  port_periph/       GPIO / ADC / I2C / UART
   port_skk/          辞書をフラッシュ / SD から読む口
-  port_spibus/       G35 を LCD DC と SD MISO で切り替える
+  port_spibus/       SPI の所有権（CoreS3 は G35 を LCD DC と SD MISO で切り替える）
   port_storage/      microSD (FATFS/SDSPI)
+  port_wasm/         .wasm を専用タスクで走らせる
   libssh2/           ベンダリングした libssh2 1.11.1
-main/              起動とタスク構成だけ
-host/              ホスト側 CMake / ctest / 基準レンダラ / VT フィクスチャ
+  wasm3/             ベンダリングした wasm3
+main/              起動・メインループ・シェルのコマンド（cdk_*cmds.c）
+host/              ホスト側 CMake / ctest / 基準レンダラ / フィクスチャ
 wasm-sdk/          ユーザーアプリの SDK（C）
   rust/              同じ ABI の Rust クレート cdk-app + サンプル
 wasm-apps/         サンプルアプリ（C）
-tools/             PC 側スクリプト（cdk.py / mkfont.py / skk_build.py /
-                   wasmcc.py / wasmrs.py / wasminfo.py）
+tools/             PC 側スクリプト（cdk.py / gen_secrets.py / mkfont.py / skk_build.py /
+                   wasmcc.py / wasmrs.py / wasminfo.py / check_board_pins.py /
+                   check_banner_width.py）
 ```
 
 ## SKK 辞書

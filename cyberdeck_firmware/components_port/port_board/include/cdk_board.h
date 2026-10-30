@@ -111,7 +111,11 @@
 #define CDK_BOARD_LCD_MISO    13 /* ファームは読み戻さない。未接続でもよい */
 #define CDK_BOARD_LCD_RST     14
 
-/* ---- microSD (SPI3。LCD とは別バス) ---- */
+/* ---- microSD (SPI3。LCD とは別バス) ----
+ *
+ * **基板 v1 の回路図・基板データの信号名とは違うが、こちらが実物に合っている。**
+ * 液晶モジュールのフットプリントで SD のパッドの並びが逆になっていた
+ * （HARDWARE_DESIGN.md「基板 v1 の既知の誤り」）。回路図に合わせて直さないこと。 */
 #define CDK_BOARD_SD_SPI_HOST SPI3_HOST
 #define CDK_BOARD_SD_MOSI    39
 #define CDK_BOARD_SD_MISO    40
@@ -153,7 +157,7 @@
 
 /* ---- 外部 UART（D-sub / Grove。排他） ----
  *
- * D-sub 側は SP3232EEN がドライバ 2・レシーバ 2 なので、
+ * D-sub 側は RS-232C の IC（基板 v1 は XD3232）がドライバ 2・レシーバ 2 なので、
  * TX/RX/RTS/CTS がちょうど載る（HARDWARE_DESIGN.md）。RTS/CTS は
  * フロー制御を使わないなら空くピンで、`uart --flow` のときだけ掴む。 */
 #define CDK_BOARD_HAS_EXT_UART  1
