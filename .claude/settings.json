@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"C:/DATA-0/Documents/20260827_cyberdeck_1/dev-stats-hook.py\"",
+            "command": "python \"$CLAUDE_PROJECT_DIR/dev-stats-hook.py\"",
             "timeout": 10
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"C:/DATA-0/Documents/20260827_cyberdeck_1/dev-stats-hook.py\" fail",
+            "command": "python \"$CLAUDE_PROJECT_DIR/dev-stats-hook.py\" fail",
             "timeout": 10
           }
         ]
