@@ -214,6 +214,42 @@ typedef struct {
 cdk_scp_parse_t cdk_shell_scp_parse(const char *a, const char *b,
                                     cdk_scp_args_t *out);
 
+/* 相手で走らせる `scp -t <パス>`（送る）/ `scp -f <パス>`（取る）の行を作る。
+ *
+ * **libssh2 の scp_send / scp_recv は使わない。** あれはパスを必ず
+ * `'...'` で括るが、Windows の sshd は cmd.exe で走らせるので引用符が
+ * そのまま scp.exe に渡り、`'C:/x': No such file or directory` で断られる。
+ *
+ *   - 安全な字（英数字と `/._-:~+,@=`）だけなら**括らない**。どの相手でも通る
+ *     （OpenSSH の scp も括らずに送る。`~/` が相手のホームになるのも同じ）
+ *   - それ以外は windows なら `"..."`、そうでなければ `'...'`（`'` は `'\''`）
+ *   - windows で `"` を含むものは括りようがないので false
+ *
+ * 入らないときも false（切り詰めない。途中で切れたパスは別のファイルを触る）。 */
+bool cdk_shell_scp_command(bool upload, const char *path, bool windows, char *out,
+                           size_t cap);
+
+/* 受信で相手の scp が最初に送ってくる 1 行（改行は除いたもの）の種類。 */
+typedef enum {
+    CDK_SCP_HDR_FILE = 0, /* `C0644 <大きさ> <名前>`。size に大きさ */
+    CDK_SCP_HDR_TIME,     /* `T...`（-p の時刻）。\0 で答えて次の行を読む */
+    CDK_SCP_HDR_DIR,      /* `D...`。ディレクトリは取らない（1 本だけ） */
+    CDK_SCP_HDR_ERROR,    /* 先頭が 0x01 / 0x02。理由は line + 1 */
+    CDK_SCP_HDR_BAD       /* 読めない */
+} cdk_scp_hdr_t;
+
+/* 大きさは 64 ビットで読む。**4GB を超えるかどうかは呼び側が決める**
+ * （libssh2 の scp_recv2 は 32 ビットの st_size に詰めて上を落としていた）。 */
+cdk_scp_hdr_t cdk_shell_scp_header(const char *line, uint64_t *size);
+
+/* 長い文を、頭 head バイトと尻尾を残して間を `...` に詰める。
+ *
+ * **相手の断りの理由は最後に来る。** Windows の scp は
+ * `scp: C:/Users/.../nope.txt: No such file or directory` のように
+ * 長いパスのあとに理由を書くので、頭から切ると肝心の理由が消える。
+ * 収まるならそのまま写す。UTF-8 の字の途中では切らない。cap は 8 以上。 */
+void cdk_shell_elide_middle(const char *s, size_t head, char *out, size_t cap);
+
 /* ---- uart の引数 ---- */
 
 typedef struct {

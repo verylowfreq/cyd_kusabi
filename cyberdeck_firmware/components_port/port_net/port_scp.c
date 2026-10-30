@@ -18,25 +18,39 @@
  * ハンドルと 256KB のパケット上限を持ち歩く。1 本ずつ運ぶだけなら
  * SCP のほうが軽い。**代わりに相手側に `scp` の実行ファイルが要る。**
  *
+ * ## 相手の scp はこちらで起こす（libssh2 の scp_send / scp_recv は使わない）
+ *
+ * libssh2 はパスを必ず `'...'` で括って `scp -t` / `scp -f` を走らせる。
+ * **Windows の sshd は cmd.exe で走らせるので、引用符がそのまま scp.exe に
+ * 渡って `'C:/x': No such file or directory` で断られる**（2026-10-30、
+ * Windows の OpenSSH 9.5 で踏んだ）。libssh2 は無改造の方針なので、
+ * チャネルを開いて exec し、最初のやり取り（準備完了・`C` 行・返事）は
+ * ここで書く。行の作り方と `C` 行の読み方は cdk_shell（ホストでテスト）。
+ *
+ * ついでに、相手が断った理由（「No such file or directory」など）を
+ * そのまま出せるようになった。libssh2 は読んで捨てて「failed to send file」
+ * だけを残していた。
+ *
  * ## 踏みやすい所（実装がここに集まっている理由）
  *
  *  - **NULL が返っても失敗とは限らない。** ノンブロッキングだと
- *    `scp_send64` / `scp_recv2` は EAGAIN のとき NULL を返す。
+ *    `channel_open_session` は EAGAIN のとき NULL を返す。
  *    `libssh2_session_last_errno()` を見ないと、繋がる相手を
  *    「開けません」と誤診する。
  *  - **送信は終端の手続きが要る。** 中身を送り切ったら NUL を 1 個送り、
  *    相手の返事を 1 個読み、`send_eof` → `wait_eof` → `wait_closed`。
  *    省くと相手側が確定せず、**中身が切れたファイルや 0 バイトが届く。**
- *  - **受信は `st_size` ちょうどで読み終える。** 1 バイトでも余分に読むと、
- *    枠組みの終端待ちで固まる。そのあと終端の NUL を 1 個だけ読み、続きが
- *    来ないことを時計つきで確かめる（4GB 超で申告が切られていないか。
- *    ノンブロッキングなので待っても固まらない）。
+ *  - **受信は C 行の大きさちょうどで読み終える。** 1 バイトでも余分に
+ *    読むと、枠組みの終端待ちで固まる。そのあと終端の NUL を 1 個だけ読み、
+ *    続きが来ないことを時計つきで確かめる（ノンブロッキングなので待っても
+ *    固まらない）。
  *  - **`cdk_sd_lock()` を転送の間ずっと握らない。** CoreS3 は LCD の DC と
  *    SD の MISO が同じ G35 なので、握っている間は画面が出せない。
  *    1 回の read/write ごとに取る。
  */
 #include "cdk_net.h"
 
+#include "cdk_shell.h"
 #include "cdk_storage.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -66,9 +80,33 @@ static uint32_t s_done;
 static uint32_t s_total;
 static uint32_t s_last_progress_ms; /* 最後に進んだ時刻。行き詰まりを見る */
 
-/* 相手のパス。**引用しない。** libssh2 が中で shell quote する
- * （`quote_paths` が既定で 1）ので、こちらで括ると二重になる。 */
+/* 相手のパス（括る前）。括るのは cdk_shell_scp_command で s_cmd を作るとき。 */
 static char s_remote[200];
+
+/* 相手で走らせる行。**EAGAIN のあと同じ引数で呼び直す**ので static に持つ。
+ * `'` を `'\''` にすると最悪 4 倍になるので、パス 200 字ぶんより大きく取る。 */
+static char s_cmd[512];
+
+/* 最初のやり取りはどこまで進んだか。EAGAIN で戻るので覚えておく。
+ *   送る: チャネル → exec → 準備完了 \0 を待つ → C 行を送る → 返事を待つ
+ *   取る: チャネル → exec → \0 を送る → C 行を読む → \0 で答える */
+typedef enum {
+    OPEN_CHANNEL = 0,
+    OPEN_EXEC,
+    OPEN_WAIT_READY, /* 送る: 相手の準備完了 */
+    OPEN_SEND_HEADER,
+    OPEN_WAIT_ACK, /* 送る: C 行への返事 */
+    OPEN_SEND_GO,  /* 取る: \0 を送る（T 行のあとも） */
+    OPEN_READ_HEADER,
+    OPEN_SEND_ACK, /* 取る: C 行に \0 で答える */
+    OPEN_READ_WHY  /* 相手が 0x01 / 0x02 で断った。続く理由の行を読む */
+} open_t;
+static open_t s_open;
+
+/* 相手から来る 1 行の読みかけ（C 行・断りの理由）。送る C 行もここで作る。 */
+static char   s_line[256];
+static size_t s_line_len;
+static size_t s_line_at; /* 送る C 行のうち何バイト送ったか */
 
 /* 手元のパス。受信は書き上がるまで .tmp に置く（下の rename の理由）。 */
 static char s_final[200];
@@ -222,7 +260,7 @@ esp_err_t cdk_scp_start(bool upload, const char *local, const char *remote,
     snprintf(s_final, sizeof(s_final), "%s", local);
     snprintf(s_remote, sizeof(s_remote), "%s", remote);
 
-    /* 送信は先に大きさが要る（`libssh2_scp_send64` の引数）。
+    /* 送信は先に大きさが要る（C 行に書く）。
      * **ここで見ておけば、繋ぐ前に「ありません」と言える。** */
     struct stat st;
     if (upload) {
@@ -267,6 +305,20 @@ esp_err_t cdk_scp_start(bool upload, const char *local, const char *remote,
         return err;
     }
 
+    /* 相手で走らせる行を作る。**括り方は相手のシェル次第**なので、繋いで
+     * 相手の名乗り（`SSH-2.0-OpenSSH_for_Windows_9.5`）を見てから決める。 */
+    const char *banner = libssh2_session_banner_get(cdk_ssh_session_raw());
+    const bool  windows = (banner != NULL && strstr(banner, "Windows") != NULL);
+    if (!cdk_shell_scp_command(upload, remote, windows, s_cmd, sizeof(s_cmd))) {
+        snprintf(why, why_cap, "%s",
+                 (windows && strchr(remote, '"') != NULL)
+                     ? "Windows の相手には \" を含むパスを渡せません"
+                     : "パスが長すぎます");
+        cdk_ssh_session_close();
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_LOGI(TAG, "相手 %s → %s", (banner != NULL) ? banner : "(名乗りなし)", s_cmd);
+
     /* ここから先はメインループが刻むのでノンブロッキングにする。
      * **セッションとソケットの両方**（片方だけだと libssh2 の recv() が
      * カーネルの中で待って、メインループが止まる。実機で踏んだ）。
@@ -278,6 +330,9 @@ esp_err_t cdk_scp_start(bool upload, const char *local, const char *remote,
     }
 
     s_phase = CDK_SCP_PHASE_OPEN;
+    s_open = OPEN_CHANNEL;
+    s_line_len = 0;
+    s_line_at = 0;
     s_last_progress_ms = now_ms();
     s_busy = true;
     ESP_LOGI(TAG, "%s %s %s %s", login->user, upload ? "へ送る" : "から取る",
@@ -295,48 +350,86 @@ static void fail(const char *fallback)
     s_phase = CDK_SCP_PHASE_DONE;
 }
 
-/* ---- OPEN: SCP のチャネルを開く ---- */
-static void pump_open(void)
+/* 相手の 1 行を s_line に溜める（改行は入れない）。
+ * 1 = 揃った、0 = まだ（EAGAIN）、-1 = 切れた・長すぎる。 */
+static int read_line(void)
 {
-    LIBSSH2_SESSION *sess = cdk_ssh_session_raw();
-
-    if (s_upload) {
-        /* mtime / atime は 0 にする。**時計を送らない。** 送ると相手側で
-         * `-p` 相当の往復が 1 回増えるうえ、この機械に信頼できる時計が無い。 */
-        s_ch = libssh2_scp_send64(sess, s_remote, 0644,
-                                  (libssh2_int64_t)s_total, 0, 0);
-    } else {
-        /* **先に 0 で埋める。** 途中で返ってきたときに st_mode で見分ける
-         * ため（libssh2 は枠組みの途中でもチャネルを返すことがある）。 */
-        libssh2_struct_stat sb;
-        memset(&sb, 0, sizeof(sb));
-        s_ch = libssh2_scp_recv2(sess, s_remote, &sb);
-        if (s_ch != NULL) {
-            if (sb.st_mode == 0) {
-                /* まだ枠組みの途中。次の刻みでやり直す（内部の状態は
-                 * 保たれているので、同じ引数で呼び直せば続きから進む）。 */
-                s_ch = NULL;
-                return;
-            }
-            /* 符号なしで読み直す（2GB〜4GB は負で来る）。4GB 超は上が
-             * 落ちていて、ここでは分からない。FINISH の終端確認で断る。 */
-            s_total = (uint32_t)sb.st_size;
+    while (s_line_len + 1u < sizeof(s_line)) {
+        char      c = 0;
+        const int r = (int)libssh2_channel_read(s_ch, &c, 1);
+        if (again(r)) {
+            return 0;
         }
-    }
-
-    if (s_ch == NULL) {
-        const int rc = libssh2_session_last_errno(sess);
-        if (again(rc)) {
-            return; /* **NULL でも失敗とは限らない。** 次の刻みで続く */
+        if (r < 0) {
+            return -1;
         }
-        why_from_libssh2(s_upload ? "相手に書けません" : "相手のファイルが開けません");
-        fail("開けません");
-        return;
+        if (r == 0) {
+            return libssh2_channel_eof(s_ch) ? -1 : 0;
+        }
+        if (c == '\n') {
+            s_line[s_line_len] = '\0';
+            return 1;
+        }
+        s_line[s_line_len++] = c;
     }
+    return -1;
+}
 
-    /* チャネルが開いてから手元のファイルを開く。**FATFS の空きハンドルは
-     * 本体に 1 本しかない**（4 本は wasm 用に予約済み）ので、認証中に
-     * 読む鍵ファイルと重ならないようにする。 */
+/* 相手の返事 1 バイト。1 = 良し (\0)、0 = まだ、-1 = 失敗（理由は s_why か、
+ * 断られたなら OPEN_READ_WHY へ進めてある）。 */
+static int read_ack(void)
+{
+    char      c = 0;
+    const int r = (int)libssh2_channel_read(s_ch, &c, 1);
+    if (again(r)) {
+        return 0;
+    }
+    if (r < 0) {
+        why_from_libssh2("相手の返事が読めません");
+        return -1;
+    }
+    if (r == 0) {
+        if (!libssh2_channel_eof(s_ch)) {
+            return 0;
+        }
+        /* 何も言わずに閉じた。相手に scp が無いとこうなる（シェルが
+         * 「command not found」を stderr に出して終わる）。 */
+        snprintf(s_why, sizeof(s_why), "相手の scp が応答しません（scp はありますか）");
+        return -1;
+    }
+    if (c != 0) {
+        /* **理由は相手が続けて送ってくる。** 状態バイトの次に改行までの
+         * メッセージが来るので、それを読んでから終える。 */
+        s_line_len = 0;
+        s_open = OPEN_READ_WHY;
+        return -1;
+    }
+    return 1;
+}
+
+/* 1 行ぶん（s_line の s_line_at から s_line_len まで）を送る。1 = 送り切った。 */
+static int write_line(void)
+{
+    while (s_line_at < s_line_len) {
+        const ssize_t w =
+            libssh2_channel_write(s_ch, s_line + s_line_at, s_line_len - s_line_at);
+        if (w == LIBSSH2_ERROR_EAGAIN) {
+            return 0;
+        }
+        if (w < 0) {
+            why_from_libssh2("相手に送れません");
+            return -1;
+        }
+        s_line_at += (size_t)w;
+    }
+    return 1;
+}
+
+/* 手元のファイルを開く。**最初のやり取りが済んでから開く。** FATFS の
+ * 空きハンドルは本体に 1 本しかない（4 本は wasm 用に予約済み）ので、
+ * 認証中に読む鍵ファイルと重ならないようにする。 */
+static bool open_local(void)
+{
     cdk_sd_lock();
     s_fp = fopen(s_upload ? s_final : s_tmp, s_upload ? "rb" : "wb");
     cdk_sd_unlock();
@@ -345,12 +438,199 @@ static void pump_open(void)
          * （`cdk_editcmds.c` の保存メッセージと同じ扱い）。 */
         snprintf(s_why, sizeof(s_why), "%.80s を開けません",
                  s_upload ? s_final : s_tmp);
-        fail("開けません");
+        return false;
+    }
+    return true;
+}
+
+/* ---- OPEN: 相手の scp を起こして、最初のやり取りを済ませる ---- */
+static void pump_open(void)
+{
+    LIBSSH2_SESSION *sess = cdk_ssh_session_raw();
+    int              rc = 0;
+
+    switch (s_open) {
+    case OPEN_CHANNEL:
+        s_ch = libssh2_channel_open_session(sess);
+        if (s_ch == NULL) {
+            if (again(libssh2_session_last_errno(sess))) {
+                return; /* **NULL でも失敗とは限らない。** 次の刻みで続く */
+            }
+            why_from_libssh2("チャネルを開けません");
+            fail("開けません");
+            return;
+        }
+        s_open = OPEN_EXEC;
+        s_last_progress_ms = now_ms();
         return;
+
+    case OPEN_EXEC:
+        /* EAGAIN のときは同じ引数で呼び直す（s_cmd は static）。 */
+        rc = libssh2_channel_exec(s_ch, s_cmd);
+        if (again(rc)) {
+            return;
+        }
+        if (rc != 0) {
+            why_from_libssh2("相手の scp を起こせません");
+            fail("開けません");
+            return;
+        }
+        s_open = s_upload ? OPEN_WAIT_READY : OPEN_SEND_GO;
+        s_last_progress_ms = now_ms();
+        return;
+
+    case OPEN_WAIT_READY:
+    case OPEN_WAIT_ACK:
+        rc = read_ack();
+        if (rc == 0) {
+            return;
+        }
+        if (rc < 0) {
+            if (s_open != OPEN_READ_WHY) {
+                fail("断られました");
+            }
+            return;
+        }
+        s_last_progress_ms = now_ms();
+        if (s_open == OPEN_WAIT_READY) {
+            /* C 行。名前は**手元の**ファイル名（OpenSSH の scp と同じ）。
+             * 相手は宛先がディレクトリならその下にこの名前で置き、ファイル
+             * ならその名前で置く。mode は 0644。**時刻は送らない**（-p 無し。
+             * この機械に信頼できる時計が無い）。 */
+            const char *slash = strrchr(s_final, '/');
+            const char *base = (slash != NULL) ? slash + 1 : s_final;
+            const int   n = snprintf(s_line, sizeof(s_line), "C0644 %lu %s\n",
+                                     (unsigned long)s_total, base);
+            if (n <= 0 || (size_t)n >= sizeof(s_line)) {
+                snprintf(s_why, sizeof(s_why), "名前が長すぎます");
+                fail("名前が長すぎます");
+                return;
+            }
+            s_line_len = (size_t)n;
+            s_line_at = 0;
+            s_open = OPEN_SEND_HEADER;
+            return;
+        }
+        /* C 行が受け入れられた。中身へ */
+        if (!open_local()) {
+            fail("開けません");
+            return;
+        }
+        s_phase = CDK_SCP_PHASE_XFER;
+        return;
+
+    case OPEN_SEND_HEADER:
+        rc = write_line();
+        if (rc == 0) {
+            return;
+        }
+        if (rc < 0) {
+            fail("送れません");
+            return;
+        }
+        s_open = OPEN_WAIT_ACK;
+        s_last_progress_ms = now_ms();
+        return;
+
+    case OPEN_SEND_GO:
+        /* 「送ってよい」の \0。T 行に答えるときもここを通る。 */
+        rc = (int)libssh2_channel_write(s_ch, "\0", 1);
+        if (again(rc)) {
+            return;
+        }
+        if (rc < 0) {
+            why_from_libssh2("相手に送れません");
+            fail("送れません");
+            return;
+        }
+        s_line_len = 0;
+        s_open = OPEN_READ_HEADER;
+        s_last_progress_ms = now_ms();
+        return;
+
+    case OPEN_READ_HEADER: {
+        rc = read_line();
+        if (rc == 0) {
+            return;
+        }
+        if (rc < 0) {
+            if (s_line_len == 0 && libssh2_channel_eof(s_ch)) {
+                snprintf(s_why, sizeof(s_why),
+                         "相手の scp が応答しません（scp はありますか）");
+            } else {
+                why_from_libssh2("相手の返事が読めません");
+            }
+            fail("開けません");
+            return;
+        }
+        s_last_progress_ms = now_ms();
+        uint64_t            size = 0;
+        const cdk_scp_hdr_t h = cdk_shell_scp_header(s_line, &size);
+        switch (h) {
+        case CDK_SCP_HDR_FILE:
+            /* **4GB 以上は FAT に置けない**（s_total も 32 ビット）。
+             * 大きさは 64 ビットのまま読めているので、ここで断れる。 */
+            if (size > UINT32_MAX) {
+                snprintf(s_why, sizeof(s_why), "大きすぎます (4GB 超)");
+                fail("大きすぎます");
+                return;
+            }
+            s_total = (uint32_t)size;
+            if (!open_local()) {
+                fail("開けません");
+                return;
+            }
+            s_open = OPEN_SEND_ACK;
+            return;
+        case CDK_SCP_HDR_TIME:
+            s_open = OPEN_SEND_GO; /* 時刻は使わない。\0 で答えて次の行へ */
+            return;
+        case CDK_SCP_HDR_DIR:
+            snprintf(s_why, sizeof(s_why), "ディレクトリは取れません（1 本だけ）");
+            fail("ディレクトリです");
+            return;
+        case CDK_SCP_HDR_ERROR:
+            /* 相手の言葉をそのまま。長ければ間を詰める（理由は最後に来る）。 */
+            cdk_shell_elide_middle(s_line + 1, 24, s_why, sizeof(s_why));
+            fail("断られました");
+            return;
+        default:
+            snprintf(s_why, sizeof(s_why), "相手の返事が読めません: %.60s", s_line);
+            fail("読めません");
+            return;
+        }
     }
 
-    s_phase = CDK_SCP_PHASE_XFER;
-    s_last_progress_ms = now_ms();
+    case OPEN_SEND_ACK:
+        rc = (int)libssh2_channel_write(s_ch, "\0", 1);
+        if (again(rc)) {
+            return;
+        }
+        if (rc < 0) {
+            why_from_libssh2("相手に送れません");
+            fail("送れません");
+            return;
+        }
+        s_phase = CDK_SCP_PHASE_XFER;
+        s_last_progress_ms = now_ms();
+        return;
+
+    case OPEN_READ_WHY:
+    default:
+        rc = read_line();
+        if (rc == 0) {
+            return;
+        }
+        if (rc > 0 && s_line_len > 0) {
+            /* 相手の言葉をそのまま出す（「No such file or directory」など）。
+             * 長ければ間を詰める（理由は最後に来る）。 */
+            cdk_shell_elide_middle(s_line, 24, s_why, sizeof(s_why));
+        } else {
+            snprintf(s_why, sizeof(s_why), "相手が断りました");
+        }
+        fail("断られました");
+        return;
+    }
 }
 
 /* ---- XFER: 中身を動かす ---- */
@@ -437,16 +717,19 @@ static void pump_finish(void)
 {
     if (!s_upload && s_rfin == RFIN_STATUS) {
         /* **申告どおり読み終えたら、次は scp の終端（NUL 1 個）のはず。**
-         * 違うものが来たら、申告の大きさが 32 ビットに切られていた
-         * ＝相手のファイルは 4GB 超。中身の続きを終端と取り違えている。 */
+         * 違うものが来たら、申告より中身が長い。
+         *
+         * （libssh2 の scp_recv2 を使っていた頃は、申告が 32 ビットに切られて
+         * 4GB 超がここで初めて分かった。いまは C 行を 64 ビットで読んで先に
+         * 断るので、ここは相手の枠組みの確認として残している。） */
         char      c = 0;
         const int r = (int)libssh2_channel_read(s_ch, &c, 1);
         if (again(r)) {
             return;
         }
         if (r == 1 && c != 0) {
-            snprintf(s_why, sizeof(s_why), "大きすぎます (4GB 超)");
-            fail("大きすぎます");
+            snprintf(s_why, sizeof(s_why), "相手が申告より長く送ってきました");
+            fail("長さが合いません");
             return;
         }
         /* NUL、または相手が閉じた（終端を送らない実装もある）。 */
@@ -455,15 +738,15 @@ static void pump_finish(void)
         return;
     }
     if (!s_upload && s_rfin == RFIN_TAIL) {
-        /* **NUL のあとに何も続かないことを確かめる。** 切られた申告が
-         * たまたま中身の 0 バイトで終わっていると、上の確認をすり抜ける
-         * （4GB 超の疎なファイルなら必ずそうなる）。正しい転送なら相手の
-         * scp は終端を送ってこちらの応答を待つので、ここでは何も来ない。 */
+        /* **NUL のあとに何も続かないことを確かめる。** 申告より長い中身が
+         * たまたま 0 バイトで続いていると、上の確認をすり抜ける。正しい
+         * 転送なら相手の scp は終端を送ってこちらの応答を待つので、
+         * ここでは何も来ない。 */
         char      tail[16];
         const int r = (int)libssh2_channel_read(s_ch, tail, sizeof(tail));
         if (r > 0) {
-            snprintf(s_why, sizeof(s_why), "大きすぎます (4GB 超)");
-            fail("大きすぎます");
+            snprintf(s_why, sizeof(s_why), "相手が申告より長く送ってきました");
+            fail("長さが合いません");
             return;
         }
         if (again(r) && now_ms() - s_tail_since < CDK_SCP_TAIL_WAIT_MS) {
@@ -522,19 +805,24 @@ static void pump_finish(void)
             /* **理由は相手が続けて送ってくる。** scp は状態バイトの次に
              * 改行までのメッセージを流すので、それを借りる。
              * 「断られました」だけでは何を直せばいいか分からない。 */
-            char   msg[96];
+            /* 入れ物は s_line を借りる（もう C 行には使わない）。 */
             size_t at = 0;
-            while (at + 1u < sizeof(msg)) {
+            while (at + 1u < sizeof(s_line)) {
                 char c = 0;
                 const int r = (int)libssh2_channel_read(s_ch, &c, 1);
                 if (r <= 0 || c == '\n') {
                     break;
                 }
-                msg[at++] = c;
+                s_line[at++] = c;
             }
-            msg[at] = '\0';
+            s_line[at] = '\0';
             if (at > 0) {
-                snprintf(s_why, sizeof(s_why), "相手が断りました: %.90s", msg);
+                /* 「相手が断りました: 」(26 バイト) の残りに、間を詰めて入れる
+                 * （Windows はパスのあとに理由を書くので、頭から切ると消える）。 */
+                static const char pre[] = "相手が断りました: ";
+                memcpy(s_why, pre, sizeof(pre) - 1u);
+                cdk_shell_elide_middle(s_line, 16, s_why + sizeof(pre) - 1u,
+                                       sizeof(s_why) - (sizeof(pre) - 1u));
             } else {
                 snprintf(s_why, sizeof(s_why), "相手が断りました (0x%02x)",
                          (unsigned)(unsigned char)ack);

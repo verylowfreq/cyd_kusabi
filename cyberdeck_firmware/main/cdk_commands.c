@@ -467,9 +467,9 @@ static int cmd_scp(int argc, char **argv, void *user)
         return 1;
     }
 
-    /* `user@host:` とだけ書かれたら、手元の名前をそのまま使う。
-     * **空のまま渡してはいけない。** libssh2 は最後の `/` から名前を切るので、
-     * 空だと名前無しの要求になって相手が断る。 */
+    /* `user@host:` とだけ書かれたら、手元の名前をそのまま使う（相手の
+     * ホームに置かれる）。**空のまま渡してはいけない。** `scp -t` に宛先が
+     * 無いと相手の scp が使い方を出して終わる。 */
     const char *remote = s_scp.remote;
     if (s_scp.remote_is_empty) {
         snprintf(s_scp_remote, sizeof(s_scp_remote), "%s",

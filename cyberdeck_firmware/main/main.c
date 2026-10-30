@@ -805,10 +805,22 @@ static void on_frame(void *user, uint8_t type, const uint8_t *payload, uint32_t 
 /* 起動時の表示                                                        */
 /* ------------------------------------------------------------------ */
 
-/* 端末に 1 行出して即座に画面へ反映する。起動中の進捗を実機で見せるため。 */
+/* 端末に 1 行出して即座に画面へ反映する。起動中の進捗を実機で見せるため。
+ *
+ * **入れ物は static。** メインタスクのスタックは公開鍵認証で一度溢れて
+ * いる（#40）ので積まない。呼ぶのはメインタスクだけ（コマンドも
+ * メインループの中で走る）で、**自分の中から呼び直されることも無い**
+ * （cdk_term_feed の途中から来る応答の口では使わない約束。DESIGN.md §10
+ * 「応答を返す口では term_printf を使えない」）。この 2 つが崩れたら
+ * static はやめること。
+ *
+ * **入りきらないときも行末は守る。** 192 バイトだった頃、長いパスの
+ * `scp : 送ります ...（鍵のみ）...\r\n` が切れて改行ごと落ち、次の
+ * 知らせが同じ行に続いた。色の戻し (`\033[0m`) が落ちると、以降の字が
+ * ずっと赤くなる。切るなら UTF-8 の字の切れ目で切り、戻しと改行を足す。 */
 static void term_printf(const char *fmt, ...)
 {
-    char buf[192];
+    static char buf[512];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -817,7 +829,18 @@ static void term_printf(const char *fmt, ...)
         return;
     }
     if (n >= (int)sizeof(buf)) {
-        n = (int)sizeof(buf) - 1;
+        static const char tail[] = "\033[0m\r\n";
+        const size_t      flen = strlen(fmt);
+        const bool        nl = (flen >= 2 && strcmp(fmt + flen - 2, "\r\n") == 0);
+        const size_t      tlen = nl ? sizeof(tail) - 1 : sizeof(tail) - 3;
+        size_t            cut = sizeof(buf) - 1 - tlen;
+        /* UTF-8 の続きのバイトの途中なら、字の頭まで戻る。エスケープ列の
+         * 途中で切れても、後ろの `\033[0m` の ESC で打ち切られる。 */
+        while (cut > 0 && ((unsigned char)buf[cut] & 0xC0u) == 0x80u) {
+            cut--;
+        }
+        memcpy(buf + cut, tail, tlen);
+        n = (int)(cut + tlen);
     }
     cdk_term_feed(&s_term, buf, (size_t)n);
     cdk_screen_draw(&s_screen, &s_canvas, &s_term, false);

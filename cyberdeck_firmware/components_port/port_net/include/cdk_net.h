@@ -187,10 +187,11 @@ cdk_ssh_disconnect_t cdk_ssh_disconnect_reason(void);
 /* **大きさの上限は置かない**（wget と同じ）。SD が埋まれば書き込みの失敗で
  * 止まり、書きかけは消す。FAT に置けない 4GB 超は「大きすぎます」で断る。
  *
- * 受信の 4GB 超は**終わってからしか分からない。** この機械の off_t は
- * 32 ビットで、libssh2 が相手の申告（64 ビット）を `st_size` に詰めるときに
- * 上が落ちる。申告どおり読み終えたあとに scp の終端（NUL 1 個）が来て、
- * その後ろに何も続かないことを確かめる（port_scp.c の FINISH）。 */
+ * 受信の 4GB 超は相手の `C` 行を 64 ビットで読んで、中身が来る前に断る
+ * （libssh2 の scp_recv2 を使っていた頃は 32 ビットの `st_size` に詰められて
+ * 上が落ち、終わってからしか分からなかった）。申告どおり読み終えたあとに
+ * scp の終端（NUL 1 個）が来て、その後ろに何も続かないことも確かめる
+ * （port_scp.c の FINISH）。 */
 
 /* 終端のあとに「続き」が来ないか待つ時間 (ms)。相手の scp は終端を送ったら
  * こちらの応答を待って黙るので、正しい転送ではこの間に何も来ない。 */
@@ -198,7 +199,7 @@ cdk_ssh_disconnect_t cdk_ssh_disconnect_reason(void);
 
 typedef enum {
     CDK_SCP_PHASE_IDLE = 0,
-    CDK_SCP_PHASE_OPEN,   /* scp_send64 / scp_recv2 を通すまで */
+    CDK_SCP_PHASE_OPEN,   /* 相手の scp を起こして C 行をやり取りするまで */
     CDK_SCP_PHASE_XFER,   /* 中身を動かしている */
     CDK_SCP_PHASE_FINISH, /* 送信の終端手続き / 受信の rename */
     CDK_SCP_PHASE_DONE

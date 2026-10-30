@@ -737,6 +737,163 @@ cdk_scp_parse_t cdk_shell_scp_parse(const char *a, const char *b,
     return CDK_SCP_OK;
 }
 
+/* 括らなくてもどのシェルでも字のまま渡るもの。 */
+static bool scp_safe_char(char c)
+{
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+        return true;
+    }
+    return c != '\0' && strchr("/._-:~+,@=", c) != NULL;
+}
+
+bool cdk_shell_scp_command(bool upload, const char *path, bool windows, char *out,
+                           size_t cap)
+{
+    if (path == NULL || out == NULL || cap == 0 || path[0] == '\0') {
+        return false;
+    }
+    const char *head = upload ? "scp -t " : "scp -f ";
+    size_t      at = strlen(head);
+    if (at + 1u > cap) {
+        return false;
+    }
+    memcpy(out, head, at);
+
+    bool safe = true;
+    for (const char *p = path; *p != '\0'; p++) {
+        if (!scp_safe_char(*p)) {
+            safe = false;
+            break;
+        }
+    }
+
+/* 1 バイト足す。入らなければ false で抜ける（out は半端なまま。呼び側は使わない）。 */
+#define PUT(ch)                                                                    \
+    do {                                                                           \
+        if (at + 1u >= cap) {                                                      \
+            return false;                                                          \
+        }                                                                          \
+        out[at++] = (ch);                                                          \
+    } while (0)
+
+    if (safe) {
+        for (const char *p = path; *p != '\0'; p++) {
+            PUT(*p);
+        }
+    } else if (windows) {
+        /* cmd.exe も scp.exe の引数の解釈も `"` で括ったものを 1 つと読む。
+         * 中に `"` があると括りようがない。 */
+        if (strchr(path, '"') != NULL) {
+            return false;
+        }
+        PUT('"');
+        for (const char *p = path; *p != '\0'; p++) {
+            PUT(*p);
+        }
+        PUT('"');
+    } else {
+        /* POSIX のシェル。`'...'` の中では何も解釈されない。`'` だけは
+         * いったん閉じて `\'` で入れてから開き直す。 */
+        PUT('\'');
+        for (const char *p = path; *p != '\0'; p++) {
+            if (*p == '\'') {
+                PUT('\'');
+                PUT('\\');
+                PUT('\'');
+                PUT('\'');
+            } else {
+                PUT(*p);
+            }
+        }
+        PUT('\'');
+    }
+#undef PUT
+    out[at] = '\0';
+    return true;
+}
+
+cdk_scp_hdr_t cdk_shell_scp_header(const char *line, uint64_t *size)
+{
+    if (line == NULL || size == NULL) {
+        return CDK_SCP_HDR_BAD;
+    }
+    switch (line[0]) {
+    case '\x01':
+    case '\x02': return CDK_SCP_HDR_ERROR;
+    case 'T': return CDK_SCP_HDR_TIME;
+    case 'D': return CDK_SCP_HDR_DIR;
+    case 'C': break;
+    default: return CDK_SCP_HDR_BAD;
+    }
+
+    /* `C` + 8 進の mode + 空白 + 10 進の大きさ + 空白 + 名前 */
+    const char *p = line + 1;
+    if (*p < '0' || *p > '7') {
+        return CDK_SCP_HDR_BAD;
+    }
+    while (*p >= '0' && *p <= '7') {
+        p++;
+    }
+    if (*p != ' ') {
+        return CDK_SCP_HDR_BAD;
+    }
+    p++;
+    if (*p < '0' || *p > '9') {
+        return CDK_SCP_HDR_BAD;
+    }
+    uint64_t v = 0;
+    while (*p >= '0' && *p <= '9') {
+        const uint64_t d = (uint64_t)(*p - '0');
+        if (v > (UINT64_MAX - d) / 10u) {
+            return CDK_SCP_HDR_BAD; /* 溢れる。黙って丸めない */
+        }
+        v = v * 10u + d;
+        p++;
+    }
+    if (*p != ' ' || p[1] == '\0') {
+        return CDK_SCP_HDR_BAD; /* 名前が無い */
+    }
+    *size = v;
+    return CDK_SCP_HDR_FILE;
+}
+
+void cdk_shell_elide_middle(const char *s, size_t head, char *out, size_t cap)
+{
+    if (out == NULL || cap == 0) {
+        return;
+    }
+    if (s == NULL) {
+        out[0] = '\0';
+        return;
+    }
+    const size_t len = strlen(s);
+    if (len + 1u <= cap) {
+        memcpy(out, s, len + 1u);
+        return;
+    }
+    if (cap < 8u) {
+        out[0] = '\0';
+        return;
+    }
+    /* 頭 + "..." + 尻尾 + NUL が cap に収まるように割り振る。 */
+    const size_t room = cap - 1u - 3u;
+    if (head > room / 2u) {
+        head = room / 2u;
+    }
+    /* 頭は字の切れ目まで戻す。尻尾は字の切れ目まで進める（どちらも短くなる側）。 */
+    size_t h = head;
+    while (h > 0 && ((unsigned char)s[h] & 0xC0u) == 0x80u) {
+        h--;
+    }
+    size_t t = len - (room - h);
+    while (t < len && ((unsigned char)s[t] & 0xC0u) == 0x80u) {
+        t++;
+    }
+    memcpy(out, s, h);
+    memcpy(out + h, "...", 3);
+    memcpy(out + h + 3, s + t, len - t + 1u); /* NUL ごと */
+}
+
 /* ---- uart の引数 ---- */
 
 /* 10 進の数だけを読む。`atoi` は "9600x" を 9600 として通してしまい、

@@ -2,6 +2,8 @@ idf_component_register(SRCS "port_net.c" "port_ssh.c" "port_scp.c" "port_wget.c"
                        INCLUDE_DIRS "include"
                        REQUIRES esp_wifi esp_netif esp_event lwip libssh2 mbedtls esp-tls esp_http_client
                                 cdk_sshkey port_cfg port_storage
+                                # cdk_shell: scp の行を作る・相手の C 行を読む（ホストでテストする）
+                                cdk_shell
                        # esp_timer: 接続の刻限を見る（cdk_wifi_poll）
                        PRIV_REQUIRES esp_timer)
 

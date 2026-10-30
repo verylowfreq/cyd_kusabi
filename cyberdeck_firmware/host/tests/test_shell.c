@@ -567,6 +567,119 @@ int main(void)
                  CDK_SCP_E_USERHOST);
     }
 
+    T_CASE("scp: 相手で走らせる行（括り方）");
+    {
+        char c[128];
+        /* 安全な字だけなら括らない。**Windows でも POSIX でも同じ行**
+         * （libssh2 の `'...'` は Windows の scp.exe に引用符ごと渡って断られた） */
+        T_CHECK(cdk_shell_scp_command(true, "C:/Users/me/a.txt", true, c, sizeof(c)));
+        T_EQ_STR(c, "scp -t C:/Users/me/a.txt");
+        T_CHECK(cdk_shell_scp_command(false, "C:/Users/me/a.txt", false, c, sizeof(c)));
+        T_EQ_STR(c, "scp -f C:/Users/me/a.txt");
+        T_CHECK(cdk_shell_scp_command(true, "~/x-1_2.tar.gz", false, c, sizeof(c)));
+        T_EQ_STR(c, "scp -t ~/x-1_2.tar.gz");
+
+        /* 空白などは括る。Windows は "..."、POSIX は '...' */
+        T_CHECK(cdk_shell_scp_command(true, "C:/My Docs/a.txt", true, c, sizeof(c)));
+        T_EQ_STR(c, "scp -t \"C:/My Docs/a.txt\"");
+        T_CHECK(cdk_shell_scp_command(true, "/tmp/my docs/a;b", false, c, sizeof(c)));
+        T_EQ_STR(c, "scp -t '/tmp/my docs/a;b'");
+        /* POSIX の ' は '\'' */
+        T_CHECK(cdk_shell_scp_command(false, "/tmp/it's", false, c, sizeof(c)));
+        T_EQ_STR(c, "scp -f '/tmp/it'\\''s'");
+        /* 日本語の名前も括る（UTF-8 のバイトは安全な字に入れていない） */
+        T_CHECK(cdk_shell_scp_command(true, "/tmp/\xE3\x81\x82", false, c, sizeof(c)));
+        T_EQ_STR(c, "scp -t '/tmp/\xE3\x81\x82'");
+    }
+
+    T_CASE("scp: 相手で走らせる行（断る形）");
+    {
+        char c[24];
+        /* Windows で " を含むものは括りようがない */
+        T_CHECK(!cdk_shell_scp_command(true, "a\"b c", true, c, sizeof(c)));
+        T_CHECK(cdk_shell_scp_command(true, "a\"b c", false, c, sizeof(c)));
+        T_CHECK(!cdk_shell_scp_command(true, "", false, c, sizeof(c)));
+        /* 入らないものは切り詰めずに断る */
+        T_CHECK(!cdk_shell_scp_command(true, "/0123456789/0123456789", false, c,
+                                       sizeof(c)));
+        T_CHECK(cdk_shell_scp_command(true, "/0123456789abcde", false, c, sizeof(c)));
+        T_EQ_STR(c, "scp -t /0123456789abcde"); /* ちょうど入る (23 字 + NUL) */
+        T_CHECK(!cdk_shell_scp_command(true, "/0123456789abcdef", false, c, sizeof(c)));
+        T_CHECK(!cdk_shell_scp_command(true, "/0123456789 abcd", false, c, sizeof(c)));
+    }
+
+    T_CASE("scp: 相手の最初の行を読む");
+    {
+        uint64_t sz = 1;
+        T_EQ_INT(cdk_shell_scp_header("C0644 12345 a.txt", &sz), CDK_SCP_HDR_FILE);
+        T_EQ_INT((long long)sz, 12345);
+        T_EQ_INT(cdk_shell_scp_header("C0666 0 empty", &sz), CDK_SCP_HDR_FILE);
+        T_EQ_INT((long long)sz, 0);
+        /* **4GB 超も 64 ビットのまま読める**（libssh2 は上を落としていた） */
+        T_EQ_INT(cdk_shell_scp_header("C0644 4294968320 big.bin", &sz),
+                 CDK_SCP_HDR_FILE);
+        T_CHECK(sz == 4294968320ull);
+        /* 名前に空白があってもよい（最初の 2 つの空白だけが区切り） */
+        T_EQ_INT(cdk_shell_scp_header("C0644 5 my file.txt", &sz), CDK_SCP_HDR_FILE);
+        T_EQ_INT((long long)sz, 5);
+
+        T_EQ_INT(cdk_shell_scp_header("T1700000000 0 1700000000 0", &sz),
+                 CDK_SCP_HDR_TIME);
+        T_EQ_INT(cdk_shell_scp_header("D0755 0 dir", &sz), CDK_SCP_HDR_DIR);
+        T_EQ_INT(cdk_shell_scp_header("\x01scp: /x: No such file or directory", &sz),
+                 CDK_SCP_HDR_ERROR);
+        T_EQ_INT(cdk_shell_scp_header("\x02scp: fatal", &sz), CDK_SCP_HDR_ERROR);
+    }
+
+    T_CASE("scp: 読めない最初の行");
+    {
+        uint64_t sz = 77;
+        T_EQ_INT(cdk_shell_scp_header("", &sz), CDK_SCP_HDR_BAD);
+        T_EQ_INT(cdk_shell_scp_header("C", &sz), CDK_SCP_HDR_BAD);
+        T_EQ_INT(cdk_shell_scp_header("C0644", &sz), CDK_SCP_HDR_BAD);
+        T_EQ_INT(cdk_shell_scp_header("C0644 12", &sz), CDK_SCP_HDR_BAD);  /* 名前が無い */
+        T_EQ_INT(cdk_shell_scp_header("C0644 12 ", &sz), CDK_SCP_HDR_BAD); /* 名前が空 */
+        T_EQ_INT(cdk_shell_scp_header("C0844 12 a", &sz), CDK_SCP_HDR_BAD); /* 8 進でない */
+        T_EQ_INT(cdk_shell_scp_header("C0644 -1 a", &sz), CDK_SCP_HDR_BAD);
+        T_EQ_INT(cdk_shell_scp_header("C0644 99999999999999999999 a", &sz),
+                 CDK_SCP_HDR_BAD); /* 溢れる */
+        T_EQ_INT(cdk_shell_scp_header("Last login: ...", &sz), CDK_SCP_HDR_BAD);
+        T_EQ_INT((long long)sz, 77); /* 読めないときは触らない */
+    }
+
+    T_CASE("長い文は間を詰める（理由は最後に来る）");
+    {
+        char o[32];
+        /* 収まるならそのまま */
+        cdk_shell_elide_middle("short", 8, o, sizeof(o));
+        T_EQ_STR(o, "short");
+        cdk_shell_elide_middle("0123456789012345678901234567890", 8, o, sizeof(o));
+        T_EQ_STR(o, "0123456789012345678901234567890"); /* 31 字 = ちょうど */
+
+        /* 入らなければ頭 8 + ... + 尻尾。理由（尻尾）が残る */
+        cdk_shell_elide_middle("scp: C:/Users/me/very/long/path/nope.txt: No such file", 8,
+                               o, sizeof(o));
+        T_EQ_INT((int)strlen(o), 31);
+        T_CHECK(strncmp(o, "scp: C:/...", 11) == 0);
+        T_CHECK(strcmp(o + strlen(o) - 12, "No such file") == 0);
+
+        /* UTF-8 の字の途中では切らない（あ = 3 バイト） */
+        cdk_shell_elide_middle("\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82"
+                               "\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82"
+                               "\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82\xE3\x81\x82",
+                               4, o, 16);
+        /* 頭は 4 → 3 バイト（あ 1 字）、尻尾も字の頭から */
+        T_CHECK(strncmp(o, "\xE3\x81\x82...", 6) == 0);
+        T_EQ_INT((int)(strlen(o + 6) % 3), 0);
+        T_CHECK(strlen(o) < 16);
+
+        /* 頭が大きすぎても尻尾の場所は残す */
+        cdk_shell_elide_middle("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaazzzz",
+                               100, o, sizeof(o));
+        T_EQ_INT((int)strlen(o), 31);
+        T_CHECK(strcmp(o + strlen(o) - 4, "zzzz") == 0);
+    }
+
     T_CASE("scp: 断ったときは out を触らない");
     {
         /* **半端に埋めない。** 宛先が取れたと誤解されると、別の相手へ
