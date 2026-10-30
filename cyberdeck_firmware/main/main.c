@@ -1402,8 +1402,9 @@ static cdk_ssh_login_t ssh_login(const char *user, const char *host,
     return l;
 }
 
-/* パスワードを聞く（下で定義。app_ssh_open と呼び合う）。 */
-static void ssh_ask_password(const char *user, const char *host);
+/* パスワードを聞く（下で定義。app_ssh_open / scp_connect と呼び合う）。 */
+static void ask_password(const char *user, const char *host, cdk_shell_ask_fn cb);
+static void ssh_password_entered(void *user, const char *answer);
 
 /* いまの相手へ繋ぐ。相手は s_ssh_arg_* があればそちら、無ければ NVS。
  * **繋ぎ直しもここを通る**ので、引数で入ったセッションは同じ相手へ戻る。
@@ -1465,7 +1466,7 @@ static bool app_ssh_open(bool interactive)
                  * 入れる相手にまで平文の合言葉を打たせることになる。 */
                 if (interactive) {
                     term_printf("\033[31mssh   : 鍵では入れませんでした\033[0m\r\n");
-                    ssh_ask_password(user, host);
+                    ask_password(user, host, ssh_password_entered);
                     return false;
                 }
                 term_printf("\033[31mssh   : 認証に失敗 (ssh key で確認)\033[0m\r\n");
@@ -1494,6 +1495,19 @@ static bool app_ssh_open(bool interactive)
     return true;
 }
 
+/* 打ってもらったパスワードを、聞いた相手と一緒に覚える。
+ * **打った相手にしか送らない**（§8.3 の規則をその場のパスワードにも
+ * そのまま当てる）。`ssh` と `scp` で 1 か所。 */
+static void remember_asked(const char *answer)
+{
+    strncpy(s_ask_user, s_ask_target_user, sizeof(s_ask_user) - 1);
+    s_ask_user[sizeof(s_ask_user) - 1] = '\0';
+    strncpy(s_ask_host, s_ask_target_host, sizeof(s_ask_host) - 1);
+    s_ask_host[sizeof(s_ask_host) - 1] = '\0';
+    strncpy(s_ask_pass, answer, sizeof(s_ask_pass) - 1);
+    s_ask_pass[sizeof(s_ask_pass) - 1] = '\0';
+}
+
 /* パスワードが返ってきた。**ここから繋ぎ直す。**
  *
  * cdk_shell_key の中から呼ばれるので、そのまま繋いでよい（`ssh` コマンドが
@@ -1505,21 +1519,16 @@ static void ssh_password_entered(void *user, const char *answer)
         term_printf("\033[33mssh   : やめました\033[0m\r\n");
         return;
     }
-    /* **相手と一緒に覚える。** 打った相手にしか送らない（§8.3 の規則を
-     * その場のパスワードにもそのまま当てる）。 */
-    strncpy(s_ask_user, s_ask_target_user, sizeof(s_ask_user) - 1);
-    s_ask_user[sizeof(s_ask_user) - 1] = '\0';
-    strncpy(s_ask_host, s_ask_target_host, sizeof(s_ask_host) - 1);
-    s_ask_host[sizeof(s_ask_host) - 1] = '\0';
-    strncpy(s_ask_pass, answer, sizeof(s_ask_pass) - 1);
-    s_ask_pass[sizeof(s_ask_pass) - 1] = '\0';
+    remember_asked(answer);
 
     /* **1 回だけ。** ここで失敗しても app_ssh_open が s_ask_* を捨てるので、
      * 聞き直しの無限ループにはならない（次に `ssh` と打てばまた聞く）。 */
     (void)app_ssh_open(true);
 }
 
-static void ssh_ask_password(const char *user, const char *host)
+/* 答えは cb に返る（NULL ならやめた）。cb は remember_asked() してから
+ * 繋ぎ直すこと。 */
+static void ask_password(const char *user, const char *host, cdk_shell_ask_fn cb)
 {
     strncpy(s_ask_target_user, user, sizeof(s_ask_target_user) - 1);
     s_ask_target_user[sizeof(s_ask_target_user) - 1] = '\0';
@@ -1532,8 +1541,7 @@ static void ssh_ask_password(const char *user, const char *host)
              host);
     /* 入れ物は s_ask_pass。**入りきらないものは切り詰めずに断る**
      * （cdk_shell_ask が「長すぎます」と出してやめる）。 */
-    cdk_shell_ask(&s_shell, s_ask_prompt, (int)sizeof(s_ask_pass) - 1,
-                  ssh_password_entered, NULL);
+    cdk_shell_ask(&s_shell, s_ask_prompt, (int)sizeof(s_ask_pass) - 1, cb, NULL);
 }
 
 /* シェルからの入口。user/host が NULL なら NVS の設定へ戻す。 */
@@ -1555,24 +1563,33 @@ static bool app_ssh_open_to(const char *user, const char *host)
     return app_ssh_open(true);
 }
 
-/* `scp`。**接続と認証だけ待って、転送はメインループに渡す。**
+/* `scp` で頼まれた中身。**パスワードを聞いたあと、同じもので繋ぎ直す**
+ * ために持つ。cmd_scp の入れ物（cdk_commands.c の static）を当てにしない
+ * （向こうの都合で寿命が変わると、知らないうちに別の中身で繋ぎに行く）。
+ * 大きさは cdk_scp_args_t と cmd_scp の s_scp_remote に合わせてある。 */
+static bool s_scp_upload;
+static char s_scp_local[192];
+static char s_scp_remote[200];
+static char s_scp_user[48];
+static char s_scp_host[80];
+
+static void scp_password_entered(void *user, const char *answer);
+
+/* s_scp_* の中身で繋ぐ。**接続と認証だけ待って、転送はメインループに渡す。**
  *
  * 相手が NVS と同じなら溜めたパスワードを使い、違えば鍵だけで行く
- * （`ssh` でその相手のパスワードを打ってあれば、それも使う）。判定は
+ * （その場で打ってもらったものがあれば、それも使う）。判定は
  * `pick_password()` 1 か所（`ssh` と共有。**規則を 2 か所に持たない**。
  * DESIGN.md §8.3）。
  *
- * **こちらではパスワードを聞かない。** 転送はメインループが刻むので、
- * 途中でシェルに戻って伏せ字を出す道が無い。先に `ssh` で入っておけば
- * その相手のぶんは覚えている。
- *
- * **`s_ssh_arg_*` を触らない。** あれは `ssh` の繋ぎ直し先なので、
- * `scp` の相手で上書きすると、あとで切れた SSH が別の機械へ繋ぎ直す。 */
-static bool app_scp_start(bool upload, const char *local, const char *remote,
-                          const char *user, const char *host)
+ * **鍵で断られたら聞く**のも `ssh` と同じ（§8.5）。認証はここで済ませて
+ * から SESSION_SCP に入るので、聞くのはまだシェルにいるうち。 */
+static bool scp_connect(void)
 {
     load_config();
 
+    const char *user = s_scp_user;
+    const char *host = s_scp_host;
     pass_src_t  src = PASS_NONE;
     const char *pass = pick_password(user, host, &src);
 
@@ -1581,8 +1598,8 @@ static bool app_scp_start(bool upload, const char *local, const char *remote,
      * 畳まないので `/sdcard/../nvs` が通ってしまう）。
      * `cdk.py push` も同じ関数を通している。**規則を 2 か所に持たない。** */
     static char full[CDK_WASM_PATH_MAX];
-    const int   pr = cdk_wasm_path_resolve(local, (int)strlen(local), full,
-                                           (int)sizeof(full));
+    const int   pr = cdk_wasm_path_resolve(s_scp_local, (int)strlen(s_scp_local),
+                                           full, (int)sizeof(full));
     if (pr != CDK_E_OK) {
         term_printf("\033[31mscp   : %s\033[0m\r\n",
                     (pr == CDK_E_PERM) ? "microSD の外は触れません"
@@ -1590,19 +1607,77 @@ static bool app_scp_start(bool upload, const char *local, const char *remote,
         return false;
     }
 
-    term_printf("scp   : %s %s%s...\r\n", upload ? "送ります" : "取ります",
-                remote, (src == PASS_NONE) ? "（鍵のみ）" : "");
+    term_printf("scp   : %s %s%s...\r\n", s_scp_upload ? "送ります" : "取ります",
+                s_scp_remote, (src == PASS_NONE) ? "（鍵のみ）" : "");
 
     char                  why[128] = {0};
     const cdk_ssh_login_t login = ssh_login(user, host, pass);
-    const esp_err_t err =
-        cdk_scp_start(upload, full, remote, &login, why, sizeof(why));
+    const esp_err_t       err =
+        cdk_scp_start(s_scp_upload, full, s_scp_remote, &login, why, sizeof(why));
     if (err != ESP_OK) {
+        if (err == ESP_ERR_NOT_ALLOWED) {
+            /* **通らなかったものは忘れる**（`ssh` と同じ。残すと次の `scp` も
+             * 同じ間違ったパスワードで黙って落ち、聞く道に入らない）。 */
+            if (src == PASS_ASKED) {
+                ssh_forget_asked();
+            }
+            if (src == PASS_NONE) {
+                term_printf("\033[31mscp   : 鍵では入れませんでした\033[0m\r\n");
+                ask_password(user, host, scp_password_entered);
+                return false;
+            }
+        }
         term_printf("\033[31mscp   : %s\033[0m\r\n", why);
         return false;
     }
     enter_scp();
     return true;
+}
+
+/* パスワードが返ってきた。cdk_shell_key の中から呼ばれるので、そのまま
+ * 繋いでよい（ssh_password_entered と同じ）。 */
+static void scp_password_entered(void *user, const char *answer)
+{
+    (void)user;
+    if (answer == NULL) {
+        term_printf("\033[33mscp   : やめました\033[0m\r\n");
+        return;
+    }
+    remember_asked(answer);
+
+    /* **1 回だけ。** いまは PASS_ASKED で行くので、失敗しても聞き直さずに
+     * 忘れて終わる（もう一度 `scp` と打てばまた聞く）。 */
+    (void)scp_connect();
+}
+
+/* 入れ物に入らないものは切り詰めずに断る。途中で切れたパスで繋ぐと、
+ * 頼んだのとは別のファイルを触る。 */
+static bool scp_copy(char *dst, size_t cap, const char *src)
+{
+    const size_t n = strlen(src);
+    if (n >= cap) {
+        return false;
+    }
+    memcpy(dst, src, n + 1);
+    return true;
+}
+
+/* `scp` の入口。
+ *
+ * **`s_ssh_arg_*` を触らない。** あれは `ssh` の繋ぎ直し先なので、
+ * `scp` の相手で上書きすると、あとで切れた SSH が別の機械へ繋ぎ直す。 */
+static bool app_scp_start(bool upload, const char *local, const char *remote,
+                          const char *user, const char *host)
+{
+    s_scp_upload = upload;
+    if (!scp_copy(s_scp_local, sizeof(s_scp_local), local) ||
+        !scp_copy(s_scp_remote, sizeof(s_scp_remote), remote) ||
+        !scp_copy(s_scp_user, sizeof(s_scp_user), user) ||
+        !scp_copy(s_scp_host, sizeof(s_scp_host), host)) {
+        term_printf("\033[31mscp   : 引数が長すぎます\033[0m\r\n");
+        return false;
+    }
+    return scp_connect();
 }
 
 /* あるか（ファイルでもディレクトリでも）。 */

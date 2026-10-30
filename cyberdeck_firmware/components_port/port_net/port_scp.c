@@ -247,7 +247,13 @@ esp_err_t cdk_scp_start(bool upload, const char *local, const char *remote,
     const esp_err_t err = cdk_ssh_session_open(login);
     if (err != ESP_OK) {
         if (err == ESP_ERR_NOT_ALLOWED) {
-            snprintf(why, why_cap, "認証に失敗 (ssh key で確認)");
+            /* **パスワードを送ったのに `ssh key で確認` と出すと嘘になる**
+             * （`ssh` と同じ言い分け。空はパスワード無し）。 */
+            const bool sent_pass =
+                (login->password != NULL && login->password[0] != '\0');
+            snprintf(why, why_cap, "%s",
+                     sent_pass ? "認証に失敗（鍵もパスワードも通りません）"
+                               : "認証に失敗 (ssh key で確認)");
         } else if (err == ESP_ERR_NOT_FOUND) {
             snprintf(why, why_cap, "%s に届きません", login->host);
         } else if (err == ESP_ERR_INVALID_STATE) {
