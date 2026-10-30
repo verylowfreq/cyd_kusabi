@@ -54,7 +54,7 @@ static const char *TAG = "cyberdeck";
 
 /* tools/cdk.py がこの行を見て「起動完了」と判断する。 */
 #define CDK_READY_SENTINEL "#CDK-READY"
-#define CDK_VERSION        "cyberdeck M6"
+#define CDK_VERSION        "KUSABI v1"
 
 /* フォントはフラッシュに焼き込む。SD もファイルシステムも要らない。 */
 extern const uint8_t font_start[] asm("_binary_shinonome12_cdkfont_start");

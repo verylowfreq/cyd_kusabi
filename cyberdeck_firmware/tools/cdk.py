@@ -18,7 +18,7 @@ DESIGN.md §3 の「エージェントが自律的に回せる開発ループ」
   python tools/cdk.py key ctrl+c              キーイベントを送る
   python tools/cdk.py cam out.jpg            実機のパネルをカメラで撮る
   python tools/cdk.py flash                   ビルド済みバイナリを書き込む
-  python tools/cdk.py selftest                boot + ping + shot --verify
+  python tools/cdk.py selftest                boot + ping + vt(banner) + shot --verify-vt
 
 pyserial が要る。ESP-IDF の python 環境にはもともと入っている:
   C:\\DATA-0\\Espressif\\python_env\\idf5.5_py3.14_env\\Scripts\\python.exe
@@ -793,7 +793,9 @@ def cmd_build(args) -> int:
         print(f"[cdk] {export} がありません", file=sys.stderr)
         return 1
 
-    board = getattr(args, "board", None) or "cores3"
+    # 省いたら前回の基板を引き継ぐ。cores3 に戻すと .cdk_board まで書き換わり、
+    # flash / boot の選ぶポートがずれる（ファームは前の sdkconfig のまま）。
+    board = getattr(args, "board", None) or current_board()
     if board not in BOARDS:
         print(f"[cdk] 知らない基板: {board}（{' / '.join(BOARDS)}）", file=sys.stderr)
         return 1
@@ -960,7 +962,7 @@ def main() -> int:
 
     p = sub.add_parser("build", help="idf.py build")
     p.add_argument("--board", choices=BOARDS, default=None,
-                   help="基板 (既定 cores3)。変えると sdkconfig を作り直す")
+                   help="基板 (既定 = 前回の基板。初回は cores3)。変えると sdkconfig を作り直す")
     p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("flash", help="ビルド済みバイナリを書き込む")
@@ -993,7 +995,7 @@ def main() -> int:
     p.add_argument("--index", type=int, default=None, help="カメラ index")
     p.set_defaults(func=cmd_cam)
 
-    p = sub.add_parser("selftest", help="boot + ping + shot --verify")
+    p = sub.add_parser("selftest", help="boot + ping + vt(banner) + shot --verify-vt")
     p.add_argument("--timeout", type=float, default=20.0)
     p.set_defaults(func=cmd_selftest)
 
