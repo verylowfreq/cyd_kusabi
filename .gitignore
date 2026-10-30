@@ -47,3 +47,13 @@ cyberdeck_firmware/wasm-apps/build/
 
 # Rust のビルド成果。
 cyberdeck_firmware/wasm-sdk/rust/target/
+
+# KiCad。自動バックアップ・個人の画面設定・ロック・キャッシュは入れない。
+hardware/**/*-backups/
+hardware/**/*.kicad_prl
+hardware/**/~*.lck
+hardware/**/_autosave-*
+hardware/**/*-bak
+hardware/**/fp-info-cache
+# JLCPCB 出力ツールの部品表キャッシュ（ガーバーと BOM/CPL は入れる）
+hardware/**/jlcpcb/project.db
