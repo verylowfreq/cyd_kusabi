@@ -516,7 +516,10 @@ int main(void)
                 (uint16_t)((S.lut5[(raw >> 11) & 0x1Fu] << 11) |
                            (S.lut6[(raw >> 5) & 0x3Fu] << 5) | S.lut5[raw & 0x1Fu]);
             T_CHECK(count_color(0, 0, 1, want) > 0);
-            T_CHECK(((want >> 11) & 0x1Fu) > ((raw >> 11) & 0x1Fu)); /* 赤が明るく */
+            /* 赤 (0xFF5050) の中間の成分（混ぜた白のぶんの緑）が持ち上がり、
+             * 最大の成分（赤）は動かない。 */
+            T_CHECK(((want >> 5) & 0x3Fu) > ((raw >> 5) & 0x3Fu));
+            T_EQ_INT((want >> 11) & 0x1Fu, (raw >> 11) & 0x1Fu);
         }
 
         /* **dim は補正の前に掛かる。** 逆順だと「補正後の半分」になり、
