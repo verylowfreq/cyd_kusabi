@@ -63,6 +63,14 @@ typedef struct {
     bool        active; /* false の間はキーを無視する（SSH に入っている等） */
     int         last_status;
 
+    /* 画面の桁数。0 = 知らない（1 段に収まる前提で CR だけで戻る）。 */
+    int cols;
+    /* 前に描いた行の形（プロンプトの先頭の段から数えて何段目か）。
+     * **折り返した行の頭へ戻るのに要る。** CR だけでは今の段の頭にしか
+     * 戻れず、上の段を残したまま描き直してしまう。 */
+    int drawn_cur_row; /* カーソルのいる段 */
+    int drawn_end_row; /* 最後の段 */
+
     /* ---- 伏せ字入力（cdk_shell_ask）----
      *
      * 行編集の器はコマンド行と同じものを使い回す。**2 つ持たない。**
@@ -81,6 +89,11 @@ void cdk_shell_set_commands(cdk_shell_t *sh, const cdk_shell_cmd_t *cmds, size_t
                             void *cmd_user);
 
 /* プロンプトを出して入力を受け付け始める。 */
+/* 出力先の端末の桁数を教える。**教えると、桁を超えて折り返した行も
+ * 正しく描き直せる。** 教えないと 1 段に収まる前提で描くので、桁を超えた
+ * 行は 1 字打つたびに上の段が残っていく。0 以下は「知らない」。 */
+void cdk_shell_set_cols(cdk_shell_t *sh, int cols);
+
 void cdk_shell_begin(cdk_shell_t *sh);
 
 /* シェルを止める（SSH に切り替えるときなど）。キーを無視するようになる。 */

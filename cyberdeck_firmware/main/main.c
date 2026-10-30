@@ -2005,6 +2005,9 @@ void app_main(void)
 
     /* シェル。コマンドは main/cdk_commands.c。 */
     cdk_shell_init(&s_shell, shell_out, NULL);
+    /* 桁数を教えないと、画面幅を超えたコマンド行を描き直すたびに上の段が
+     * 残っていく。 */
+    cdk_shell_set_cols(&s_shell, s_term.cols);
     s_ctx = (app_ctx_t){
         .sh = &s_shell,
         .term = &s_term,

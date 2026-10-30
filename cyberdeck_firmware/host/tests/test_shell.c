@@ -4,6 +4,7 @@
  * 描き直しの仕方は実装の都合で変わるが、行の中身とカーソル位置は仕様だから。
  */
 #include "cdk_shell.h"
+#include "cdk_term.h"
 #include "t.h"
 
 #include <stdio.h>
@@ -119,6 +120,55 @@ static void type(const char *s)
 {
     for (const char *p = s; *p != '\0'; p++) {
         key(CDK_K_NONE, 0, (uint32_t)(unsigned char)*p);
+    }
+}
+
+/* ---- 本物の端末に流して、画面に何が残るかで見る ----
+ *
+ * 折り返しの描き直しは「行の中身」では確かめられない。中身が正しくても、
+ * 上の段が消えずに残る（実機で 40 桁を超えたコマンドが 1 字ごとに 1 段
+ * 増えた）。cdk_term は実機と同じコードなので、ここで残れば実機でも残る。 */
+#define TCOLS 20
+#define TROWS 8
+static cdk_term_t TERM;
+static uint8_t    TERMMEM[64 * 1024];
+static char       ROWBUF[TCOLS * 4 + 1];
+
+static void on_term_out(void *user, const char *data, size_t len)
+{
+    (void)user;
+    cdk_term_feed(&TERM, data, len);
+}
+
+static void term_setup(void)
+{
+    T_CHECK(cdk_term_mem_size(TCOLS, TROWS) <= sizeof(TERMMEM));
+    T_CHECK(cdk_term_init(&TERM, TCOLS, TROWS, TERMMEM, sizeof(TERMMEM)));
+    cdk_shell_init(&SH, on_term_out, NULL);
+    cdk_shell_set_commands(&SH, CMDS, sizeof(CMDS) / sizeof(CMDS[0]), &SH);
+    cdk_shell_set_cols(&SH, TCOLS);
+    cdk_shell_begin(&SH);
+}
+
+/* 末尾の空白を詰めた段 */
+static const char *row(int y)
+{
+    cdk_term_row_text(&TERM, y, ROWBUF, sizeof(ROWBUF));
+    size_t n = strlen(ROWBUF);
+    while (n > 0 && ROWBUF[n - 1] == ' ') {
+        ROWBUF[--n] = '\0';
+    }
+    return ROWBUF;
+}
+
+static void eq_row(int y, const char *want)
+{
+    const char *got = row(y);
+    t_checks++;
+    if (strcmp(got, want) != 0) {
+        t_failures++;
+        printf("   FAIL [%s] 段 %d\n     期待 [%s]\n     実際 [%s]\n", t_current, y,
+               want, got);
     }
 }
 
@@ -959,6 +1009,160 @@ int main(void)
 
         char tiny[8];
         T_CHECK(!cdk_shell_wget_name("http://h/a", tiny, sizeof(tiny)));
+    }
+
+    /* ---- 桁を超えて折り返した行（20 桁。プロンプト `$ ` で 1 段目は 18 字）---- */
+    char a18[19], a12[13], a17[18];
+    memset(a18, 'a', 18);
+    a18[18] = '\0';
+    memset(a12, 'a', 12);
+    a12[12] = '\0';
+    memset(a17, 'a', 17);
+    a17[17] = '\0';
+    char p18[24], p17[24];
+    snprintf(p18, sizeof(p18), "$ %s", a18);
+    snprintf(p17, sizeof(p17), "$ %s", a17);
+
+    T_CASE("折り返し: 打つたびに段が増えない");
+    {
+        term_setup();
+        type("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); /* 30 字 */
+        eq_row(0, p18);
+        eq_row(1, a12);
+        eq_row(2, ""); /* 前は 1 字ごとに 1 段ずつ上に残った */
+        T_EQ_INT(TERM.cy, 1);
+        T_EQ_INT(TERM.cx, 12);
+    }
+
+    T_CASE("折り返し: 消して 1 段に戻ると下の段も消える");
+    {
+        term_setup();
+        type("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        for (int i = 0; i < 13; i++) {
+            key(CDK_K_BS, 0, 0);
+        }
+        eq_row(0, p17);
+        eq_row(1, "");
+        T_EQ_INT(TERM.cy, 0);
+        T_EQ_INT(TERM.cx, 19);
+    }
+
+    T_CASE("折り返し: ちょうど右端で終わったらカーソルは次の段の頭");
+    {
+        term_setup();
+        type(a18);
+        eq_row(0, p18);
+        T_EQ_INT(TERM.cy, 1);
+        T_EQ_INT(TERM.cx, 0);
+        type("b");
+        eq_row(1, "b");
+        T_EQ_INT(TERM.cx, 1);
+        key(CDK_K_BS, 0, 0);
+        key(CDK_K_BS, 0, 0);
+        eq_row(0, p17);
+        eq_row(1, "");
+        T_EQ_INT(TERM.cy, 0);
+        T_EQ_INT(TERM.cx, 19);
+    }
+
+    T_CASE("折り返し: 1 段目に戻って書き足す");
+    {
+        term_setup();
+        type("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        key(CDK_K_NONE, CDK_MOD_CTRL_BIT, 'a');
+        T_EQ_INT(TERM.cy, 0);
+        T_EQ_INT(TERM.cx, 2);
+        type("X");
+        eq_row(0, "$ Xaaaaaaaaaaaaaaaaa");
+        eq_row(1, "aaaaaaaaaaaaa");
+        eq_row(2, "");
+        T_EQ_INT(TERM.cy, 0);
+        T_EQ_INT(TERM.cx, 3);
+        key(CDK_K_NONE, CDK_MOD_CTRL_BIT, 'e');
+        T_EQ_INT(TERM.cy, 1);
+        T_EQ_INT(TERM.cx, 13);
+    }
+
+    T_CASE("折り返し: 右端に入らない全角は次の段へ（カーソルも）");
+    {
+        term_setup();
+        type(a17);
+        key(CDK_K_NONE, 0, 0x3042); /* あ */
+        eq_row(0, p17);
+        eq_row(1, "\xE3\x81\x82");
+        T_EQ_INT(TERM.cy, 1);
+        T_EQ_INT(TERM.cx, 2);
+        key(CDK_K_LEFT, 0, 0); /* あ の上 = 次の段の頭。右端の空きではない */
+        T_EQ_INT(TERM.cy, 1);
+        T_EQ_INT(TERM.cx, 0);
+    }
+
+    T_CASE("折り返し: 1 段目にカーソルがあっても出力は行の下から");
+    {
+        term_setup();
+        type("echo bbbbbbbbbbbbbbbbbbbb"); /* 25 字 = 2 段 */
+        key(CDK_K_NONE, CDK_MOD_CTRL_BIT, 'a');
+        key(CDK_K_ENTER, 0, 0);
+        T_EQ_INT(ECHO_CALLS, 1);
+        eq_row(0, "$ echo bbbbbbbbbbbbb");
+        eq_row(1, "bbbbbbb");
+        eq_row(2, "$");
+        T_EQ_INT(TERM.cy, 2);
+    }
+
+    T_CASE("折り返し: Ctrl-C の ^C は行の末尾に付く");
+    {
+        term_setup();
+        type("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        key(CDK_K_NONE, CDK_MOD_CTRL_BIT, 'a');
+        key(CDK_K_NONE, CDK_MOD_CTRL_BIT, 'c');
+        eq_row(0, p18);
+        eq_row(1, "aaaaaaaaaaaa^C");
+        eq_row(2, "$");
+    }
+
+    T_CASE("折り返し: 知らせは行の全段を消してから書く");
+    {
+        term_setup();
+        type("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        key(CDK_K_NONE, CDK_MOD_CTRL_BIT, 'a'); /* 1 段目にいても */
+        cdk_shell_notify(&SH, "hello");
+        eq_row(0, "hello");
+        eq_row(1, p18);
+        eq_row(2, a12);
+        eq_row(3, "");
+        T_EQ_INT(TERM.cy, 1);
+        T_EQ_INT(TERM.cx, 2);
+    }
+
+    T_CASE("折り返し: 画面の最下段で折り返して流れても戻れる");
+    {
+        term_setup();
+        for (int i = 0; i < TROWS - 1; i++) {
+            key(CDK_K_ENTER, 0, 0);
+        }
+        T_EQ_INT(TERM.cy, TROWS - 1);
+        type("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        eq_row(TROWS - 2, p18);
+        eq_row(TROWS - 1, a12);
+        for (int i = 0; i < 13; i++) {
+            key(CDK_K_BS, 0, 0);
+        }
+        eq_row(TROWS - 2, p17);
+        eq_row(TROWS - 1, "");
+        eq_row(TROWS - 3, "$"); /* 上の空のプロンプトは消していない */
+    }
+
+    T_CASE("折り返し: 伏せ字も折り返して描き直せる");
+    {
+        term_setup();
+        cdk_shell_ask(&SH, "pw: ", 64, on_ask, NULL);
+        type("xxxxxxxxxxxxxxxxxxxxxxxx"); /* 24 字。1 段目は 16 */
+        eq_row(0, "pw: ****************");
+        eq_row(1, "********");
+        eq_row(2, "");
+        key(CDK_K_ENTER, 0, 0);
+        T_CHECK(strcmp(ASK_ANSWER, "xxxxxxxxxxxxxxxxxxxxxxxx") == 0);
     }
 
     T_CASE("wget: 同名の逃がし先");

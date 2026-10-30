@@ -40,64 +40,154 @@ void cdk_shell_printf(cdk_shell_t *sh, const char *fmt, ...)
     emit(sh, buf, (size_t)n);
 }
 
-/* 画面上で何桁ぶんになるかを数える。
+/* s[i] から 1 文字ぶん進める。戻り値は次の位置（0 なら途中で切れている）。
+ * *w にその文字の桁数が入る。
  *
  * エスケープ列は幅を持たない。プロンプトに色を付けると SGR が入るので、
  * ここを素通しにするとカーソルがその文字数だけ右にずれる。
  * 全角は 2 桁として数える。 */
+static size_t next_glyph(const char *s, size_t len, size_t i, int *w)
+{
+    *w = 0;
+    if ((unsigned char)s[i] == 0x1B) {
+        i++;
+        if (i < len && (s[i] == '[' || s[i] == ']')) {
+            const char kind = s[i];
+            i++;
+            if (kind == '[') {
+                /* CSI: 終端は 0x40-0x7E */
+                while (i < len && ((unsigned char)s[i] < 0x40 ||
+                                   (unsigned char)s[i] > 0x7E)) {
+                    i++;
+                }
+            } else {
+                /* OSC: BEL か ESC で終わる */
+                while (i < len && (unsigned char)s[i] != 0x07 &&
+                       (unsigned char)s[i] != 0x1B) {
+                    i++;
+                }
+            }
+        }
+        if (i < len) {
+            i++; /* 終端文字を飛ばす */
+        }
+        return i;
+    }
+
+    uint32_t cp = 0;
+    bool ok = false;
+    const size_t used = cdk_utf8_decode((const uint8_t *)s + i, len - i, &cp, &ok);
+    if (used == 0) {
+        return 0; /* 途中で切れている */
+    }
+    *w = ok ? cdk_char_width(cp) : 1;
+    return i + used;
+}
+
+/* 画面上で何桁ぶんになるかを数える。 */
 int cdk_shell_visible_width(const char *s, size_t len)
 {
     int width = 0;
     size_t i = 0;
 
     while (i < len && s[i] != '\0') {
-        if ((unsigned char)s[i] == 0x1B) {
-            i++;
-            if (i < len && (s[i] == '[' || s[i] == ']')) {
-                const char kind = s[i];
-                i++;
-                if (kind == '[') {
-                    /* CSI: 終端は 0x40-0x7E */
-                    while (i < len && ((unsigned char)s[i] < 0x40 ||
-                                       (unsigned char)s[i] > 0x7E)) {
-                        i++;
-                    }
-                } else {
-                    /* OSC: BEL か ESC で終わる */
-                    while (i < len && (unsigned char)s[i] != 0x07 &&
-                           (unsigned char)s[i] != 0x1B) {
-                        i++;
-                    }
-                }
-            }
-            if (i < len) {
-                i++; /* 終端文字を飛ばす */
-            }
-            continue;
+        int w = 0;
+        const size_t next = next_glyph(s, len, i, &w);
+        if (next == 0) {
+            break;
         }
-
-        uint32_t cp = 0;
-        bool ok = false;
-        const size_t used = cdk_utf8_decode((const uint8_t *)s + i, len - i, &cp, &ok);
-        if (used == 0) {
-            break; /* 途中で切れている */
-        }
-        width += ok ? cdk_char_width(cp) : 1;
-        i += used;
+        width += w;
+        i = next;
     }
     return width;
 }
 
+/* ---- 折り返した行のどこに何があるか ----
+ *
+ * **cdk_term と同じ規則で数える。** ずれると、描き直すたびに行が 1 段ずつ
+ * 上か下へ滑っていく。
+ *   - 遅延折返し: 右端に書いた時点では折り返さず、次の字が来たら改行する
+ *   - 全角が右端 1 桁に入らないときは、その桁を空けて次の段へ送る */
+typedef struct {
+    int  row;     /* 行頭（プロンプトの先頭）から何段目か */
+    int  col;
+    bool pending; /* 右端に書いた直後（次の字で折り返す） */
+} layout_t;
+
+static void layout_put(layout_t *p, int cols, int w)
+{
+    if (w <= 0) {
+        return; /* 結合文字は cdk_term も捨てる */
+    }
+    if (p->pending) {
+        p->row++;
+        p->col = 0;
+        p->pending = false;
+    }
+    if (w == 2 && p->col + 1 > cols - 1) {
+        p->row++;
+        p->col = 0;
+    }
+    p->col += w;
+    if (p->col > cols - 1) {
+        p->col = cols - 1;
+        p->pending = true;
+    }
+}
+
+static void layout_feed(layout_t *p, int cols, const char *s, size_t len)
+{
+    size_t i = 0;
+    while (i < len && s[i] != '\0') {
+        int w = 0;
+        const size_t next = next_glyph(s, len, i, &w);
+        if (next == 0) {
+            break;
+        }
+        layout_put(p, cols, w);
+        i = next;
+    }
+}
+
+/* 前に描いた行を消して、カーソルを行頭（プロンプトの先頭）に置く。
+ *
+ * **折り返していたら上の段から消す。** CR だけでは今いる段の頭にしか
+ * 戻らないので、上の段が残ったまま下に描き直すことになる（40 桁を
+ * 超えたコマンドが 1 字打つたびに 1 段ずつ増えていった）。 */
+static void erase_drawn(cdk_shell_t *sh)
+{
+    if (sh->cols <= 0) {
+        emit(sh, "\r\033[K", 4);
+        return;
+    }
+    if (sh->drawn_cur_row > 0) {
+        char buf[16];
+        const int n = snprintf(buf, sizeof(buf), "\033[%dA", sh->drawn_cur_row);
+        emit(sh, buf, (size_t)n);
+    }
+    /* 折り返していたら下を全部消す（段の数だけ EL を打つより確実。
+     * シェルの行はいつも出力の最後にある）。1 段なら EL だけにして、
+     * 下にあるものには触らない。 */
+    emit(sh, (sh->drawn_end_row > 0) ? "\r\033[J" : "\r\033[K", 4);
+    sh->drawn_cur_row = 0;
+    sh->drawn_end_row = 0;
+}
+
 /* 行を丸ごと描き直す。
  *
- * 差分更新はしない。端末の桁数を知らないので、折り返した行のどこに
- * カーソルがあるかを正しく追えないため。CR で行頭に戻して消して書き直す方が、
- * 遅くても常に正しい。1 行 256 文字なので実用上も問題にならない。 */
+ * 差分更新はしない。消して書き直す方が、遅くても常に正しい。
+ * 1 行 256 文字なので実用上も問題にならない。
+ *
+ * 桁数 (cols) を知っているときは折り返しを追う。知らないときは 1 段に
+ * 収まる前提で CR だけで戻る（cdk_shell_set_cols を呼ばない使い方）。
+ *
+ * 行が画面の段数より高くなると上が流れて戻れなくなる。256 字は 40 桁で
+ * 7 段なので、今の画面では起きない。 */
 static void redraw(cdk_shell_t *sh)
 {
     const char *prompt = (sh->prompt != NULL) ? sh->prompt : "$ ";
 
-    emit(sh, "\r\033[K", 4);
+    erase_drawn(sh);
     emit(sh, prompt, strlen(prompt));
 
     /* **伏せ字のときは行の中身を出さない。** ここが唯一の出口なので、
@@ -118,6 +208,61 @@ static void redraw(cdk_shell_t *sh)
         emit(sh, sh->line, (size_t)sh->len);
     }
 
+    if (sh->cols > 0) {
+        /* 書き終えた位置（end）と、カーソルを置く位置（cur）を数える。
+         * 伏せ字のときカーソルは常に末尾。 */
+        layout_t end = {0, 0, false};
+        layout_feed(&end, sh->cols, prompt, strlen(prompt));
+        layout_t cur = end;
+        if (sh->asking) {
+            for (int i = 0; i < stars; i++) {
+                layout_put(&end, sh->cols, 1);
+            }
+            cur = end;
+        } else {
+            layout_feed(&cur, sh->cols, sh->line, (size_t)sh->cursor);
+            end = cur;
+            layout_feed(&end, sh->cols, sh->line + sh->cursor,
+                        (size_t)(sh->len - sh->cursor));
+        }
+
+        /* カーソルは「次の字が置かれる桁」に置く。右端に書いた直後なら
+         * 次の段の頭。カーソル下の字が全角で右端に入らないときも次の段。 */
+        int trow = cur.row;
+        int tcol = cur.col;
+        if (cur.pending) {
+            trow++;
+            tcol = 0;
+        } else if (!sh->asking && sh->cursor < sh->len) {
+            int w = 0;
+            (void)next_glyph(sh->line, (size_t)sh->len, (size_t)sh->cursor, &w);
+            if (w == 2 && tcol + 1 > sh->cols - 1) {
+                trow++;
+                tcol = 0;
+            }
+        }
+
+        if (trow > end.row) {
+            /* 末尾がちょうど右端で終わった。次の段はまだ無いので作る。 */
+            emit(sh, "\r\n", 2);
+        } else {
+            if (end.row > trow) {
+                char buf[16];
+                const int n = snprintf(buf, sizeof(buf), "\033[%dA", end.row - trow);
+                emit(sh, buf, (size_t)n);
+            }
+            emit(sh, "\r", 1);
+            if (tcol > 0) {
+                char buf[16];
+                const int n = snprintf(buf, sizeof(buf), "\033[%dC", tcol);
+                emit(sh, buf, (size_t)n);
+            }
+        }
+        sh->drawn_cur_row = trow;
+        sh->drawn_end_row = (trow > end.row) ? trow : end.row;
+        return;
+    }
+
     /* カーソルを行頭に戻してから、プロンプト＋カーソル位置まで右へ動かす。
      * 伏せ字のときカーソルは常に末尾なので、`*` の数がそのまま桁になる。 */
     const int width =
@@ -131,6 +276,23 @@ static void redraw(cdk_shell_t *sh)
         const int n = snprintf(buf, sizeof(buf), "\033[%dC", width);
         emit(sh, buf, (size_t)n);
     }
+}
+
+/* 行を離れる（Enter・Ctrl-C・候補一覧）前に、カーソルを行の末尾へ置く。
+ *
+ * 折り返しの途中の段で改行すると、続く出力が行の残りの段に上書きされる。
+ * `^C` も途中に書くと行の字を潰す。末尾に置いて描き直せば、どちらも
+ * 行の後ろから始まる。 */
+static void leave_drawn(cdk_shell_t *sh)
+{
+    if (sh->cols > 0 && sh->cursor != sh->len) {
+        const int saved = sh->cursor;
+        sh->cursor = sh->len;
+        redraw(sh);
+        sh->cursor = saved;
+    }
+    sh->drawn_cur_row = 0;
+    sh->drawn_end_row = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -345,6 +507,7 @@ static void complete(cdk_shell_t *sh)
         return;
     }
     if (matches > 1) {
+        leave_drawn(sh);
         cdk_shell_write(sh, "\r\n");
         for (size_t i = 0; i < sh->ncmds; i++) {
             if (strncmp(sh->cmds[i].name, sh->line, (size_t)n) == 0) {
@@ -377,6 +540,13 @@ void cdk_shell_set_commands(cdk_shell_t *sh, const cdk_shell_cmd_t *cmds, size_t
     sh->cmd_user = cmd_user;
 }
 
+void cdk_shell_set_cols(cdk_shell_t *sh, int cols)
+{
+    sh->cols = (cols > 0) ? cols : 0;
+    sh->drawn_cur_row = 0;
+    sh->drawn_end_row = 0;
+}
+
 /* 伏せ字入力をやめて普通の行に戻す。**cb は呼ばない。**
  *
  * 打ちかけの中身も消す。SSH が落ちて enter_shell() まで戻ってきたときに
@@ -403,6 +573,10 @@ void cdk_shell_begin(cdk_shell_t *sh)
     sh->active = true;
     clear_line(sh);
     sh->hist_pos = -1;
+    /* 止まっている間に別の誰か（SSH・エディタ）が画面を使った。前に描いた
+     * 行の形はもう当てにならないので、今いる段から新しく描く。 */
+    sh->drawn_cur_row = 0;
+    sh->drawn_end_row = 0;
     redraw(sh);
 }
 
@@ -837,7 +1011,8 @@ void cdk_shell_notify(cdk_shell_t *sh, const char *s)
     if (!sh->active || s == NULL) {
         return;
     }
-    emit(sh, "\r\033[K", 4);
+    /* 折り返した行なら全段を消してから書く（上の段が知らせの上に残る）。 */
+    erase_drawn(sh);
     emit(sh, s, strlen(s));
     emit(sh, "\r\n", 2);
     redraw(sh);
@@ -872,6 +1047,7 @@ static void ask_key(cdk_shell_t *sh, const cdk_key_t *k)
         memcpy(answer, sh->line, (size_t)sh->len);
         answer[sh->len] = '\0';
 
+        leave_drawn(sh);
         cdk_shell_write(sh, (cancel_key && k->keycode != CDK_K_ESC) ? "^C\r\n"
                                                                     : "\r\n");
         ask_reset(sh); /* ここで sh->line が消える */
@@ -955,6 +1131,8 @@ void cdk_shell_key(cdk_shell_t *sh, const cdk_key_t *k)
 
     switch (k->keycode) {
     case CDK_K_ENTER:
+        /* カーソルが折り返しの途中の段にいても、出力は行の下から始める。 */
+        leave_drawn(sh);
         cdk_shell_write(sh, "\r\n");
         history_push(sh, sh->line);
         {
@@ -1091,6 +1269,7 @@ void cdk_shell_key(cdk_shell_t *sh, const cdk_key_t *k)
             return;
         }
         case 'c': /* 入力を捨てて新しい行 */
+            leave_drawn(sh);
             cdk_shell_write(sh, "^C\r\n");
             clear_line(sh);
             sh->hist_pos = -1;
@@ -1098,6 +1277,8 @@ void cdk_shell_key(cdk_shell_t *sh, const cdk_key_t *k)
             return;
         case 'l': /* 画面消去 */
             cdk_shell_write(sh, "\033[2J\033[H");
+            sh->drawn_cur_row = 0; /* 前の行はもう画面に無い */
+            sh->drawn_end_row = 0;
             redraw(sh);
             return;
         case 'd':
