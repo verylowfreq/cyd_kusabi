@@ -396,6 +396,80 @@ static void skk_commit(void *ctx, const char *utf8, size_t len)
     }
 }
 
+/* Shift+PgUp / PgDn を SSH 先のアプリへ渡す。渡したら true。
+ * 行き先は cdk_term_page_route が相手の状態から決める（ホストでテスト済み）:
+ * マウス報告を頼まれていればホイール、報告の無い代替画面なら Shift なしの
+ * PgUp / PgDn。通常の画面なら false を返し、こちらのスクロールバックに任せる。 */
+static bool page_to_remote(bool up)
+{
+    const cdk_page_route_t route = cdk_term_page_route(&s_term);
+    if (route == CDK_PAGE_LOCAL) {
+        return false;
+    }
+    if (cdk_term_view_offset(&s_term) > 0) {
+        cdk_term_view_reset(&s_term); /* 遡ったまま相手を動かすと見えない */
+        s_dirty = true;
+    }
+
+    uint8_t out[32];
+    if (route == CDK_PAGE_WHEEL) {
+        const int steps = cdk_term_wheel_steps(&s_term);
+        for (int i = 0; i < steps; i++) {
+            const size_t n = cdk_term_wheel_report(&s_term, up, out, sizeof(out));
+            if (n == 0) {
+                return i > 0; /* 形式に載らない。1 段も送れなければこちらで処理 */
+            }
+            (void)cdk_ssh_write(out, n);
+        }
+        ESP_LOGI(TAG, "Shift+%s → ホイール %d 段", up ? "PgUp" : "PgDn", steps);
+        return true;
+    }
+
+    const cdk_key_t plain = {.keycode = up ? CDK_K_PGUP : CDK_K_PGDN, .mods = 0, .codepoint = 0};
+    const size_t n = cdk_keys_encode(&plain, s_term.app_cursor_keys, out, sizeof(out));
+    if (n > 0) {
+        (void)cdk_ssh_write(out, n);
+    }
+    ESP_LOGI(TAG, "Shift+%s → %s", up ? "PgUp" : "PgDn", up ? "PgUp" : "PgDn");
+    return true;
+}
+
+/* SSH 先のアプリが端末に何を頼んだかをログに出す（変わったときだけ）。
+ * Shift+PgUp / PgDn がどの行き先になるかは、ここを見れば分かる。
+ * ESC [ 3 J は描き直しのたびに来ることがあるので、まとめて 2 秒に 1 回。 */
+static void log_term_modes(void)
+{
+    static bool     s_alt;
+    static uint16_t s_mode;
+    static uint16_t s_enc;
+    static uint32_t s_clear_seen;
+    static uint32_t s_clear_logged_at;
+
+    if (s_term.alt_active != s_alt) {
+        s_alt = s_term.alt_active;
+        ESP_LOGI(TAG, "term: 代替画面 %s", s_alt ? "に入った" : "から出た");
+    }
+    if (s_term.mouse_mode != s_mode || s_term.mouse_enc != s_enc) {
+        s_mode = s_term.mouse_mode;
+        s_enc = s_term.mouse_enc;
+        if (s_mode == 0) {
+            ESP_LOGI(TAG, "term: マウス報告なし（形式 %u）", (unsigned)s_enc);
+        } else {
+            ESP_LOGI(TAG, "term: マウス報告 %u（形式 %u）→ Shift+PgUp はホイール",
+                     (unsigned)s_mode, (unsigned)s_enc);
+        }
+    }
+    if (s_term.stat_clear_hist != s_clear_seen) {
+        const uint32_t now = now_ms();
+        if ((uint32_t)(now - s_clear_logged_at) >= 2000u) {
+            ESP_LOGI(TAG, "term: ESC[3J（履歴を消す）を受けた（累計 %u）",
+                     (unsigned)s_term.stat_clear_hist);
+            s_clear_seen = s_term.stat_clear_hist;
+            s_clear_logged_at = now;
+        }
+    }
+}
+
 /* キーの行き先を決める唯一の場所。 */
 static void route_key(void *user, const cdk_key_t *k)
 {
@@ -425,9 +499,17 @@ static void route_key(void *user, const cdk_key_t *k)
      *    そのぶん、再接続を待っている間はスクロールが効かない。
      *
      * Shift+PgUp / PgDn は端末の慣例で、SSH 先へは送らないのが普通なので
-     * `vi` や `less` と衝突しない。 */
+     * `vi` や `less` と衝突しない。
+     *
+     * **ただし SSH 先のアプリがスクロールを自分で持っているときは渡す**
+     * （page_to_remote）。この機械にはマウスが無く、claude / codex のような
+     * 全画面アプリはホイールでしかスクロールできないことがあるため。 */
     if ((k->mods & CDK_MOD_SHIFT_BIT) != 0u &&
         (k->keycode == CDK_K_PGUP || k->keycode == CDK_K_PGDN)) {
+        if (s_session == SESSION_SSH && cdk_ssh_is_open() &&
+            page_to_remote(k->keycode == CDK_K_PGUP)) {
+            return;
+        }
         /* 1 画面ぶん。1 行重ねると読みつなぎやすい。 */
         int step = s_term.rows - 1;
         if (step < 1) {
@@ -2208,6 +2290,7 @@ void app_main(void)
                     }
                     break;
                 }
+                log_term_modes();
             }
         }
 

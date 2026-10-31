@@ -236,12 +236,20 @@ static void set_private_mode(cdk_term_t *t, int mode, bool on)
     case 1000:
     case 1002:
     case 1003:
+        /* マウス報告。返すのはホイールだけ（cdk_term_wheel_report）。
+         * 受理しないと CLI 側がシーケンスを画面に垂れ流すことがある。
+         * xterm と同じく、どれを落としても報告は止まる。 */
+        t->mouse_mode = on ? (uint16_t)mode : 0;
+        break;
     case 1005:
     case 1006:
     case 1015:
-        /* マウス報告。受理はするが報告は返さない。
-         * 受理しないと CLI 側がシーケンスを画面に垂れ流すことがある。 */
-        t->mouse_tracking = on;
+        /* 報告の形式。これだけでは報告は始まらない。 */
+        if (on) {
+            t->mouse_enc = (uint16_t)mode;
+        } else if (t->mouse_enc == mode) {
+            t->mouse_enc = 0;
+        }
         break;
     case 1048:
         if (on) {
@@ -436,6 +444,7 @@ static void erase_display(cdk_term_t *t)
          * 2J とは別の意味になった。遡っている最中にも来る。 */
         cdk__fill(t, 0, 0, t->cols - 1, t->rows - 1);
         cdk_term_hist_clear(t);
+        t->stat_clear_hist++;
         break;
     default:
         t->stat_unknown++;

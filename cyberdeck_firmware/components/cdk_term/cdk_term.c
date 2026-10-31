@@ -82,7 +82,8 @@ void cdk_term_reset(cdk_term_t *t)
     t->app_cursor_keys = false;
     t->app_keypad = false;
     t->insert_mode = false;
-    t->mouse_tracking = false;
+    t->mouse_mode = 0;
+    t->mouse_enc = 0;
 
     t->charset_g0_dec = false;
     t->charset_g1_dec = true; /* 慣例: G1 に DEC 特殊グラフィクス */

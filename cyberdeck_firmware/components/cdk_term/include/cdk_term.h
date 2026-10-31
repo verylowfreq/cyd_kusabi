@@ -110,7 +110,13 @@ typedef struct {
     bool app_cursor_keys;
     bool app_keypad;
     bool insert_mode;
-    bool mouse_tracking;   /* 受理するが報告はしない */
+    /* マウス報告。クリックや移動は返さない。**ホイールだけ**、Shift+PgUp / PgDn の
+     * 代わりに返す（cdk_term_wheel_report）。
+     * mouse_mode: 0 = 報告なし / 1000 / 1002 / 1003（最後に入れたもの）
+     * mouse_enc:  0 = 既定（ESC [ M + 3 バイト）/ 1005 / 1006 / 1015
+     * **形式 (1006 など) だけでは報告は始まらない。** */
+    uint16_t mouse_mode;
+    uint16_t mouse_enc;
 
     cdk_term_saved_t saved;
     cdk_term_saved_t saved_alt;
@@ -151,6 +157,7 @@ typedef struct {
 
     /* 診断用 */
     uint32_t stat_unknown; /* 捨てたシーケンスの数 */
+    uint32_t stat_clear_hist; /* ESC [ 3 J（画面 + 履歴を消す）を受けた数 */
 } cdk_term_t;
 
 /* cols x rows に必要なメモリ量。cdk_term_init に渡すブロックの大きさ。 */
@@ -186,6 +193,29 @@ int  cdk_term_view_offset(const cdk_term_t *t);
 int  cdk_term_view_scroll(cdk_term_t *t, int delta);
 void cdk_term_view_reset(cdk_term_t *t);
 void cdk_term_hist_clear(cdk_term_t *t);
+
+/* ---- Shift+PgUp / PgDn の行き先 ----
+ *
+ * 相手のアプリの状態で決める。判断だけで、送るのは呼び出し側。
+ *   WHEEL : マウス報告を頼まれている。ホイールを回したことにして送る
+ *           （スクロールを自分で処理したいと言っているのと同じ）
+ *   KEY   : 代替画面だが報告は頼まれていない。Shift なしの PgUp / PgDn を送る。
+ *           ↑ / ↓ にしないのは、入力欄で履歴の呼び出しになって打ちかけが消えるから
+ *   LOCAL : 通常の画面。こちらのスクロールバックを動かす */
+typedef enum {
+    CDK_PAGE_LOCAL = 0,
+    CDK_PAGE_WHEEL,
+    CDK_PAGE_KEY,
+} cdk_page_route_t;
+
+cdk_page_route_t cdk_term_page_route(const cdk_term_t *t);
+
+/* 1 回押したときに回すホイールの段数。行数 / 3（最低 1）。 */
+int cdk_term_wheel_steps(const cdk_term_t *t);
+
+/* ホイール 1 段ぶんの報告を out に書く。位置は横が中央、縦が上から 1/4（入力欄を避ける）。
+ * 形式は mouse_enc に合わせる。報告を頼まれていない・入らないときは 0。 */
+size_t cdk_term_wheel_report(const cdk_term_t *t, bool up, uint8_t *out, size_t cap);
 
 /* 履歴の古いほうから i 行目。cdk_term_row が使う。 */
 const cdk_cell_t *cdk__hist_row(const cdk_term_t *t, int i);

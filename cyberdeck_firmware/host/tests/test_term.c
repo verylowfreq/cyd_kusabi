@@ -632,7 +632,115 @@ int main(void)
         feed("\033[?1h");
         T_CHECK(T.app_cursor_keys);
         feed("\033[?1000h\033[?1006h");
-        T_CHECK(T.mouse_tracking);
+        T_EQ_INT(T.mouse_mode, 1000);
+        T_EQ_INT(T.mouse_enc, 1006);
+    }
+
+    T_CASE("Shift+PgUp の行き先: 形式だけではホイールにしない");
+    {
+        setup();
+        T_EQ_INT(cdk_term_page_route(&T), CDK_PAGE_LOCAL);
+        feed("\033[?1006h"); /* 形式だけ */
+        T_EQ_INT(T.mouse_mode, 0);
+        T_EQ_INT(cdk_term_page_route(&T), CDK_PAGE_LOCAL);
+        uint8_t b[32];
+        T_EQ_INT((int)cdk_term_wheel_report(&T, true, b, sizeof(b)), 0);
+    }
+
+    T_CASE("Shift+PgUp の行き先: 報告を頼まれたらホイール、落としたら戻る");
+    {
+        setup();
+        feed("\033[?1002h\033[?1006h");
+        T_EQ_INT(cdk_term_page_route(&T), CDK_PAGE_WHEEL);
+        feed("\033[?1049h"); /* 代替画面でも報告が優先 */
+        T_EQ_INT(cdk_term_page_route(&T), CDK_PAGE_WHEEL);
+        feed("\033[?1002l");
+        T_EQ_INT(T.mouse_mode, 0);
+        T_EQ_INT(T.mouse_enc, 1006); /* 形式は残る */
+        T_EQ_INT(cdk_term_page_route(&T), CDK_PAGE_KEY);
+        feed("\033[?1049l");
+        T_EQ_INT(cdk_term_page_route(&T), CDK_PAGE_LOCAL);
+        feed("\033[?1006l");
+        T_EQ_INT(T.mouse_enc, 0);
+    }
+
+    T_CASE("Shift+PgUp の行き先: 報告の無い代替画面は PgUp キー");
+    {
+        setup();
+        feed("\033[?1049h");
+        T_EQ_INT(cdk_term_page_route(&T), CDK_PAGE_KEY);
+        feed("\033c"); /* RIS で全部戻る */
+        T_EQ_INT(cdk_term_page_route(&T), CDK_PAGE_LOCAL);
+        feed("\033[?1000h");
+        feed("\033c");
+        T_EQ_INT(T.mouse_mode, 0);
+    }
+
+    T_CASE("ホイールの報告: 形式ごとのバイト列（位置は横が中央、縦が上から 1/4）");
+    {
+        /* 20x6 なので (11, 1)。6 / 4 = 1。 */
+        uint8_t b[32];
+        setup();
+        feed("\033[?1000h\033[?1006h");
+        size_t n = cdk_term_wheel_report(&T, true, b, sizeof(b));
+        T_EQ_INT((int)n, 11);
+        T_EQ_MEM(b, "\033[<64;11;1M", n);
+        n = cdk_term_wheel_report(&T, false, b, sizeof(b));
+        T_EQ_MEM(b, "\033[<65;11;1M", n);
+
+        setup();
+        feed("\033[?1000h\033[?1015h");
+        n = cdk_term_wheel_report(&T, true, b, sizeof(b));
+        T_EQ_INT((int)n, 10);
+        T_EQ_MEM(b, "\033[96;11;1M", n);
+
+        setup();
+        feed("\033[?1000h"); /* 既定の形式: ESC [ M と 32 足した 3 バイト */
+        n = cdk_term_wheel_report(&T, false, b, sizeof(b));
+        T_EQ_INT((int)n, 6);
+        T_EQ_MEM(b, "\033[M\x61\x2b\x21", n); /* 32+65, 32+11, 32+1 */
+    }
+
+    T_CASE("ホイールの報告: 40x12（2 倍表示）では 3 行目。入力欄の上に当てない");
+    {
+        /* codex は入力欄とその上 2 行ほどではホイールに反応しない。
+         * 中央（7 行目）だとそこに入って効かなかった（2026-10-31）。 */
+        static cdk_term_t big;
+        static uint8_t bmem[64 * 1024];
+        uint8_t b[32];
+        T_CHECK(cdk_term_init(&big, 40, 12, bmem, sizeof(bmem)));
+        cdk_term_feed(&big, "\033[?1003h\033[?1006h", 16);
+        const size_t n = cdk_term_wheel_report(&big, true, b, sizeof(b));
+        T_EQ_MEM(b, "\033[<64;21;3M", n);
+    }
+
+    T_CASE("ホイールの報告: 入らないときは書かない");
+    {
+        uint8_t b[32];
+
+        setup();
+        feed("\033[?1000h\033[?1006h");
+        T_EQ_INT((int)cdk_term_wheel_report(&T, true, b, 5), 0); /* 入らない */
+    }
+
+    T_CASE("ホイールの段数は行数 / 3（最低 1）");
+    {
+        setup();
+        T_EQ_INT(cdk_term_wheel_steps(&T), 2); /* 6 行 */
+        static cdk_term_t small;
+        static uint8_t smem[8 * 1024];
+        T_CHECK(cdk_term_init(&small, 10, 2, smem, sizeof(smem)));
+        T_EQ_INT(cdk_term_wheel_steps(&small), 1);
+    }
+
+    T_CASE("ESC [ 3 J を数える（診断用）");
+    {
+        setup();
+        T_EQ_U32(T.stat_clear_hist, 0u);
+        feed("\033[2J");
+        T_EQ_U32(T.stat_clear_hist, 0u);
+        feed("\033[3J\033[3J");
+        T_EQ_U32(T.stat_clear_hist, 2u);
     }
 
     T_CASE("原点モード (DECOM)");
